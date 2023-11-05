@@ -183,24 +183,31 @@ def inverse_subdivide_UI_draw(self, context):
 
     layout = layout.column()
     # don't hide so it's actually possible to tweak the settings while off
-    # if not user_preferences.enable_operator:
-    #     layout.enabled = False
 
-    layout.prop(user_preferences, "always_on", toggle=False, icon='MOD_TIME')
+    layout.prop(user_preferences, "always_on", toggle=True, icon='MOD_TIME')
     if user_preferences.always_on:
         layout.prop(user_preferences, "use_timer", toggle=False, icon='TIME')
     if has_extras:
-        row = layout.row()
-        row.prop(user_preferences, "use_object_or_collection", text="Snap to")
-        if user_preferences.use_object_or_collection == 'OBJECT':
-            # Layout for target object selection using prop_search
-            row.prop(bpy.context.scene, "inverse_subdivide_target_object", text="")
-        elif user_preferences.use_object_or_collection == 'COLLECTION':
-            # Layout for target collection selection using prop_search
-            row.prop(bpy.context.scene, "inverse_subdivide_target_collection", text="")
+        layout.separator()
+        layout.label(text='Snap to')
+        if bpy.data.objects.get("FROZEN_MESH_STATE") is not None:
+            layout.operator(FreezeShape.bl_idname, text="Unfreeze shape", depress=True, icon='FREEZE')
+
         else:
-            # Scene option, no need to display anything
-            pass
+            layout.operator(FreezeShape.bl_idname, text="Freeze Shape", depress=False, icon='FREEZE')
+            row = layout.row()
+            row.prop(user_preferences, "use_object_or_collection", text="")
+            if user_preferences.use_object_or_collection == 'OBJECT':
+                # Layout for target object selection using prop_search
+                row.prop(bpy.context.scene, "inverse_subdivide_target_object", text="")
+            elif user_preferences.use_object_or_collection == 'COLLECTION':
+                # Layout for target collection selection using prop_search
+                row.prop(bpy.context.scene, "inverse_subdivide_target_collection", text="")
+            else:
+                # Scene option, no need to display anything
+                pass
+
+
         layout.separator()
         layout.prop(user_preferences, "iterations")
         layout.prop(user_preferences, "neighbours")
@@ -254,6 +261,7 @@ class VIEW3D_PT_final_topology_editmode(Panel):
             layout.operator(NormalLoopAlign.bl_idname, text="Loop Align to Normal Plane")
             layout.operator(SlideOptimizeOperator.bl_idname, text="Loop Slide Optimize")
 
+
         layout.operator(InverseSubdivideStep.bl_idname, text="Inverse Subdivide Step", icon='MOD_SUBSURF')
 
         inverse_subdivide_UI_draw(self, context)
@@ -300,7 +308,8 @@ if has_extras:
             # FunTopologyOperator,
             FlattenSelectionOperator,
             NormalLoopAlign,
-            FunTopologyDecimateOperator
+            FunTopologyDecimateOperator,
+            FreezeShape
         ]
     )
 

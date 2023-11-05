@@ -6,6 +6,12 @@ from mathutils import Vector
 from .draw import *
 from .utils import *
 
+has_extras=True
+try:
+    from . import extras
+except:
+    has_extras=False
+
 running_operator = None
 
 def get_closest_ray_hit(objects=[], source_position=Vector(), cast_direction=Vector(),
@@ -300,7 +306,7 @@ def calculate_offset(bm_eval, offset_verts_indices, offset_verts_hit_positions, 
                     total_difference += difference * others_weight
 
     offset = Vector((0, 0, 0))
-    if results_counted > 0:
+    if results_counted > 0 and total_weight > 0:
         offset = total_difference / total_weight
     return offset
 
@@ -385,7 +391,7 @@ def get_target_objects(self):
                 target_objects.append(ob)
     elif user_preferences.use_object_or_collection == "OBJECT":
         tob = bpy.context.scene.inverse_subdivide_target_object
-        if tob is not None and tob.type == 'MESH' and tob.visible_get():
+        if tob is not None and tob.type == 'MESH':# and tob.visible_get():
             target_objects.append(tob)
 
     else:
