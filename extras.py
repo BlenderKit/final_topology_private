@@ -548,7 +548,7 @@ def get_attribute_elements(object, bm, attribute_name):
             return_elements.append(vert)
             # draw.add_point(vert.co,draw.RED)
             world_vert_position = ob_matrix_world @ vert.co
-            world_normal_direction = ob_matrix_world @ (vert.co + vert.normal*0.1)
+            world_normal_direction = ob_matrix_world @ (vert.co + vert.normal*0.01)
             draw.add_line(world_vert_position,world_normal_direction,draw.YELLOW)
     return return_elements
 def evaluate_constraints(object,bm):
@@ -694,7 +694,12 @@ class FunTopologyDecimateOperator(bpy.types.Operator):
 
 class CustomConstraint(bpy.types.PropertyGroup):
     name: bpy.props.StringProperty(name="Name")
-    constraint_type: bpy.props.StringProperty(name="Type")
+    constraint_type: bpy.props.EnumProperty(name="Type", default="PLANE", items=
+    [
+        ("PLANE", "Plane", "Planar constraint"),
+        ("PLANEFIXED", "Plane Fixed (TODO)", "Planar constraint fixed"),
+        ("CURVE", "Curve (TODO)", "Curve constraint"),
+    ])
     center: bpy.props.FloatVectorProperty(name="Center", size=3)
     rotation: bpy.props.FloatVectorProperty(name="Rotation", size=3)
     attribute_name: bpy.props.StringProperty(name="Attribute Name")
@@ -720,6 +725,10 @@ class VIEW3D_PT_final_topology_constraints(bpy.types.Panel):
         col = row.column(align=True)
         col.operator("object.final_topology_add_constraint", icon='ADD', text="")
         col.operator("object.final_topology_delete_constraint", icon='REMOVE', text="")
+        ac = mesh.ft_custom_constraints[mesh.ft_custom_constraints_index]
+        layout.prop(ac, "name")
+        layout.prop(ac, "constraint_type")
+
 
 
 import bpy
