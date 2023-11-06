@@ -1,11 +1,15 @@
-import blf
-import gpu
 from gpu_extras.batch import batch_for_shader
+from gpu_extras.presets import draw_circle_2d
+
+import bpy_extras
 import mathutils
 import bpy
+import gpu
+from mathutils import Vector
 
 draw_lines = {}
 draw_faces = {}
+draw_points = {}
 draw_faces_list = []
 
 RED = (1.0, 0.0, 0.0, 1.0)
@@ -14,6 +18,20 @@ BLUE = (0.0, 0.0, 1.0, 1.0)
 ORANGE = (1.0, 0.5, 0.0, 1.0)
 YELLOW = (1.0, 1.0, 0.0, 1.0)
 CYAN = (0.0, 1.0, 1.0, 1.0)
+
+
+def clear_draw_list():
+    global draw_lines
+    global draw_faces
+    global draw_points
+    global draw_faces_list
+    print('clearing draw list')
+    print(len(draw_lines.items()))
+    draw_lines.clear()
+    draw_faces.clear()
+    draw_points.clear()
+    draw_faces_list.clear()
+    print(len(draw_lines.items()))
 
 
 def add_line(v1, v2, col):
@@ -27,12 +45,21 @@ def add_line(v1, v2, col):
     line_set.append(v2.to_tuple())
     draw_lines[col_rounded] = line_set
 
+def add_point(center, col):
+    global draw_points
+    col_rounded = (round(col[0], 1), round(col[1], 1), round(col[2], 1), round(col[3], 1))
+    point_set = draw_points.get(col_rounded, [])
+    point_set.append(center)
+    draw_points[col_rounded] = point_set
+
 
 def add_arrow(v1, v2, col, scale=3):
     '''
         Add an arrow to the draw list
     '''
     global draw_lines
+    col = (round(col[0], 1), round(col[1], 1), round(col[2], 1), round(col[3], 1))
+
     user_preferences = bpy.context.preferences.addons['final_topology'].preferences
     if user_preferences.enable_draw_arrows is False:
         return
@@ -134,7 +161,7 @@ def draw_callback_px_3d(self, context):
         shader = gpu.shader.from_builtin('UNIFORM_COLOR')
 
     gpu.state.blend_set('ALPHA')
-    gpu.state.line_width_set(2.0)
+    gpu.state.line_width_set(4.0)
 
     user_preferences = bpy.context.preferences.addons['final_topology'].preferences
     if user_preferences.enable_draw_arrows:
@@ -162,5 +189,35 @@ def draw_callback_px_3d(self, context):
             shader.uniform_float("color", col_with_alpha)
             batch.draw(shader)
 
+    for col, points in draw_points.items():
+        for point in points:
+            draw_circle_2d(point, col, .01, segments=6)
+
+            # batch = batch_for_shader(shader, 'LINES', {"pos": lines})
+            # col_with_alpha = (col[0], col[1], col[2], 0.25)
+            #
+            # shader.uniform_float("color", col_with_alpha)
+            #
+            # shader.bind()
+            # batch.draw(shader)
+            # x, y, z = point  # 3D coordinates of the point
+            # radius = .2  # Adjust the radius as needed
+            #
+            # # Set the color
+            # col_with_alpha = (col[0], col[1], col[2], 1.0)
+            # shader.uniform_float("color", col_with_alpha)
+            #
+            # # Convert 3D point to 2D screen coordinates
+            # coords_2d = bpy_extras.object_utils.world_to_camera_view(bpy.context.scene, bpy.context.scene.camera,
+            #                                                          point)
+            #
+            # if 0 <= coords_2d.x <= 1 and 0 <= coords_2d.y <= 1:
+            #     # Draw a 2D circle at the calculated screen coordinates
+            #     shader.bind()
+            #     draw_circle_2d((coords_2d.x, coords_2d.y),col_with_alpha, radius)
+
     # restore opengl defaults
     gpu.state.blend_set('NONE')
+    # ...
+
+

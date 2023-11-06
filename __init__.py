@@ -10,12 +10,29 @@ bl_info = {
     "category": "3D View",
 }
 
-from .inverse_subdivide import *
+from importlib import reload
+
 has_extras = True
-try:
-    from .extras import *
-except:
-    has_extras = False
+
+if "bpy" in locals():
+    try:
+        extras = reload(extras)
+    except:
+        has_extras = False
+    inverse_subdivide = reload(inverse_subdivide)
+    draw = reload(draw)
+    utils = reload(utils)
+else:
+    from .inverse_subdivide import *
+    try:
+        from .extras import *
+        from . import extras
+    except:
+        has_extras = False
+
+    from . import inverse_subdivide
+    from . import draw
+    from . import utils
 
 from bpy.props import (
     BoolProperty,
@@ -26,7 +43,7 @@ from bpy.props import (
     StringProperty,
 )
 from bpy.types import AddonPreferences, Operator, Panel
-
+import bpy
 
 
 
@@ -231,7 +248,6 @@ class VIEW3D_PT_final_topology_objectmode(Panel):
     bl_space_type = "VIEW_3D"
     bl_region_type = "UI"
     bl_label = "Final topology"
-    bl_options = {"DEFAULT_CLOSED"}
 
     @classmethod
     def poll(self, context):
@@ -300,18 +316,7 @@ classes = [InverseSubdivideModal,
 
            ]
 
-#extra tools from the advanced version
-if has_extras:
-    classes.extend(
-        [
-            SlideOptimizeOperator,
-            # FunTopologyOperator,
-            FlattenSelectionOperator,
-            NormalLoopAlign,
-            FunTopologyDecimateOperator,
-            FreezeShape
-        ]
-    )
+
 
 addon_keymapitems = []
 
@@ -330,6 +335,9 @@ def register():
     bpy.types.VIEW3D_MT_edit_mesh_edges.append(slide_menu_func)
     # bpy.types.VIEW3D_HT_header.append(draw_inverse_subdivide_toggle)
 
+    if has_extras:
+        extras.register()
+    # Add shortcuts
     wm = bpy.context.window_manager
     km = wm.keyconfigs.addon.keymaps.new(name="Window", space_type="VIEW_3D")
     
@@ -340,6 +348,7 @@ def register():
     kmi = km.keymap_items.new(
         "mesh.inverse_subdivide_step", type='FOUR', value='PRESS', ctrl=False, shift=False, alt=False
     )
+    print('SHORTCUTS REGISTERED')
     addon_keymapitems.append(kmi)
 
 
@@ -352,9 +361,19 @@ def unregister():
     # bpy.types.VIEW3D_PT_snapping.remove(inverse_subdivide_UI_draw)
     bpy.types.VIEW3D_MT_edit_mesh_edges.remove(slide_menu_func)
     # bpy.types.VIEW3D_HT_header.remove(draw_inverse_subdivide_toggle)
+    if has_extras:
+        extras.unregister()
 
     wm = bpy.context.window_manager
     km = wm.keyconfigs.addon.keymaps["Window"]
+
     for kmi in addon_keymapitems:
         km.keymap_items.remove(kmi)
         addon_keymapitems.clear()
+
+    try:
+        for kmi in addon_keymapitems:
+            km.keymap_items.remove(kmi)
+            addon_keymapitems.clear()
+    except:
+        print("Seems you removed your keybindings manually.")

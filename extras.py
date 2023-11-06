@@ -1,3 +1,7 @@
+#
+
+
+# this file has separate tools for experts in cad and automotive design
 import bpy
 from mathutils import Vector
 import bmesh
@@ -7,7 +11,7 @@ up = Vector((0, 0, 1))
 from bpy.types import Operator
 from bpy.props import IntProperty, FloatProperty
 from math import pi, atan2
-
+from . import draw
 def estimate_best_fit_plane(verts, method="best_fit"):
     """
     Estimate the best fit plane for a given set of vertices.
@@ -86,6 +90,67 @@ class NormalLoopAlign(Operator):
                                  use_proportional_edit=False)
         return {'FINISHED'}
 
+def flatten_verts(verts, method="best_fit", slide=False):
+    # Estimate the best fit plane
+    center, normal = estimate_best_fit_plane(verts, method)
+
+    # Define a function to get the intersection point of a line with the plane
+    def line_plane_intersection(line_start, line_end, plane_point, plane_normal):
+        line_dir = line_end - line_start
+        d = (plane_point - line_start).dot(plane_normal) / line_dir.dot(plane_normal)
+        return line_start + d * line_dir
+
+    if slide:
+        for vert in verts:
+            # For each vertex, find the closest edge intersection with the plane
+            closest_intersection = None
+            min_distance = float('inf')
+            mean_intersection = Vector((0, 0, 0))
+            end_vertex = False
+            edges_selected = 0
+            for edge in vert.link_edges:
+                if edge.select:
+                    edges_selected += 1
+            if edges_selected == 1:
+                end_vertex = True
+
+            edges_included = 0
+
+            for edge in vert.link_edges:
+                if edge.select:
+                    continue
+
+                # find out if edge has shared face with a selected edge
+                if end_vertex:
+                    shared_face = False
+                    for face in edge.link_faces:
+                        for edge2 in face.edges:
+                            if edge2.select:
+                                shared_face = True
+                    if shared_face is False:
+                        continue
+
+                other_vert = edge.other_vert(vert)
+                intersection = line_plane_intersection(vert.co, other_vert.co, center, normal)
+                distance = (vert.co - intersection).length
+                if distance < min_distance:
+                    min_distance = distance
+                    closest_intersection = intersection
+                mean_intersection += intersection
+                edges_included += 1
+
+            mean_intersection /= edges_included
+            if mean_intersection.length > 0:
+                vert.co = mean_intersection
+            # if closest_intersection:
+            #     vert.co = closest_intersection
+    else:
+        # Project the vertices onto the plane
+        for vert in verts:
+            to_center = center - vert.co
+            distance_to_plane = to_center.dot(normal)
+            vert.co += distance_to_plane * normal
+
 
 class FlattenSelectionOperator(Operator):
     bl_idname = "mesh.flatten_selection"
@@ -124,67 +189,10 @@ class FlattenSelectionOperator(Operator):
         # Get the selected vertices
         selected_verts = [v for v in bm.verts if v.select]
 
-        # Estimate the best fit plane
-        center, normal = estimate_best_fit_plane(selected_verts, self.method)
-
-        # Define a function to get the intersection point of a line with the plane
-        def line_plane_intersection(line_start, line_end, plane_point, plane_normal):
-            line_dir = line_end - line_start
-            d = (plane_point - line_start).dot(plane_normal) / line_dir.dot(plane_normal)
-            return line_start + d * line_dir
-
-        if self.slide:
-            for vert in selected_verts:
-                # For each vertex, find the closest edge intersection with the plane
-                closest_intersection = None
-                min_distance = float('inf')
-                mean_intersection = Vector((0, 0, 0))
-                end_vertex = False
-                edges_selected = 0
-                for edge in vert.link_edges:
-                    if edge.select:
-                        edges_selected += 1
-                if edges_selected == 1:
-                    end_vertex = True
-
-                edges_included = 0
-
-                for edge in vert.link_edges:
-                    if edge.select:
-                        continue
-
-                    # find out if edge has shared face with a selected edge
-                    if end_vertex:
-                        shared_face = False
-                        for face in edge.link_faces:
-                            for edge2 in face.edges:
-                                if edge2.select:
-                                    shared_face = True
-                        if shared_face is False:
-                            continue
-
-                    other_vert = edge.other_vert(vert)
-                    intersection = line_plane_intersection(vert.co, other_vert.co, center, normal)
-                    distance = (vert.co - intersection).length
-                    if distance < min_distance:
-                        min_distance = distance
-                        closest_intersection = intersection
-                    mean_intersection += intersection
-                    edges_included += 1
-
-                mean_intersection /= edges_included
-                if mean_intersection.length > 0:
-                    vert.co = mean_intersection
-                # if closest_intersection:
-                #     vert.co = closest_intersection
-        else:
-            # Project the vertices onto the plane
-            for vert in selected_verts:
-                to_center = center - vert.co
-                distance_to_plane = to_center.dot(normal)
-                vert.co += distance_to_plane * normal
+        flatten_verts(selected_verts, self.method, self.slide)
 
         bmesh.update_edit_mesh(obj.data)
+
         return {'FINISHED'}
 
 
@@ -529,6 +537,29 @@ def find_longest_shared_edges(bm, only_triangles=False):
 
     return longest_shared_edges
 
+def get_attribute_elements(object, bm, attribute_name):
+    attribute_layer =  bm.verts.layers.float[attribute_name]
+    return_elements = []
+    ob_matrix_world = object.matrix_world
+    # Transform vertex coordinates to world space
+    for vert in bm.verts:
+        val= vert[attribute_layer]
+        if val == 1.0:
+            return_elements.append(vert)
+            # draw.add_point(vert.co,draw.RED)
+            world_vert_position = ob_matrix_world @ vert.co
+            world_normal_direction = ob_matrix_world @ (vert.co + vert.normal*0.1)
+            draw.add_line(world_vert_position,world_normal_direction,draw.YELLOW)
+    return return_elements
+def evaluate_constraints(object,bm):
+    cs = object.data.ft_custom_constraints
+    for c in cs:
+        # print('evaluating constraint',c.name)
+        if c.constraint_type == 'PLANE':
+            plane_verts = get_attribute_elements(object, bm,c.attribute_name)
+            if len(plane_verts)>2:
+                flatten_verts(plane_verts, slide=False, method='best_fit')
+
 def activate_object(ob):
     bpy.ops.object.select_all(action='DESELECT')
     ob.select_set(True)
@@ -543,7 +574,11 @@ def create_freeze_mesh_object():
     freeze_mesh_object.name='FROZEN_MESH_STATE'
     freeze_mesh_object.name='FROZEN_MESH_STATE' #double setting name removes the .001s
 
-    freeze_mesh_object.modifiers.clear()
+    for m in freeze_mesh_object.modifiers:
+        if m.type != 'MIRROR':
+            m.show_viewport=False
+            m.show_render=False
+    # freeze_mesh_object.modifiers.clear()
     #hide the object
     # freeze_mesh_object.hide_viewport = True
     freeze_mesh_object.hide_set(True)
@@ -613,9 +648,7 @@ class FunTopologyDecimateOperator(bpy.types.Operator):
             global draw_faces
             user_preferences = bpy.context.preferences.addons['final_topology'].preferences
 
-            draw_lines.clear()
-            draw_faces.clear()
-            draw_faces_list.clear()
+            draw.clear_draw_list
             tool_settings = context.tool_settings
             bpy.context.view_layer.update()
 
@@ -658,3 +691,162 @@ class FunTopologyDecimateOperator(bpy.types.Operator):
     def cancel(self, context):
         context.window_manager.event_timer_remove(self.timer)
 
+
+class CustomConstraint(bpy.types.PropertyGroup):
+    name: bpy.props.StringProperty(name="Name")
+    constraint_type: bpy.props.StringProperty(name="Type")
+    center: bpy.props.FloatVectorProperty(name="Center", size=3)
+    rotation: bpy.props.FloatVectorProperty(name="Rotation", size=3)
+    attribute_name: bpy.props.StringProperty(name="Attribute Name")
+
+
+class VIEW3D_PT_final_topology_constraints(bpy.types.Panel):
+    bl_label = "Constraints"
+    bl_idname = "VIEW3D_PT_final_topology_constraints"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = 'Final topology'
+    bl_parent_id = "VIEW3D_PT_final_topology_editmode"
+
+    def draw(self, context):
+        layout = self.layout
+        mesh = context.object.data
+
+        ft_custom_constraints = mesh.ft_custom_constraints
+
+        row = layout.row()
+        row.template_list("CUSTOM_UL_list", "", mesh, "ft_custom_constraints", mesh, "ft_custom_constraints_index")
+
+        col = row.column(align=True)
+        col.operator("object.final_topology_add_constraint", icon='ADD', text="")
+        col.operator("object.final_topology_delete_constraint", icon='REMOVE', text="")
+
+
+import bpy
+
+def fill_attribute_with_selection(attribute_name, mesh, type="FLOAT", domain="POINT"):
+    bm = bmesh.from_edit_mesh(mesh)
+    values = [v.select for v in bm.verts]
+    bpy.ops.object.mode_set(mode="OBJECT")
+    # do this in object mode now
+    attribute = mesh.attributes.get(attribute_name)
+    if attribute is None:
+        attribute = mesh.attributes.new(name=attribute_name, type="FLOAT", domain="POINT")
+    attribute.data.foreach_set("value", values)
+
+    bpy.ops.object.mode_set(mode="EDIT")
+
+
+class AddConstraintOperator(bpy.types.Operator):
+    bl_idname = "object.final_topology_add_constraint"
+    bl_label = "Add Constraint"
+
+    name: bpy.props.StringProperty(name="Name", default='Constraint')
+    constraint_type: bpy.props.EnumProperty(name="Type", default="PLANE", items=
+    [
+        ("PLANE", "Plane", "Planar constraint"),
+        ("PLANEFIXED", "Plane Fixed (TODO)", "Planar constraint fixed"),
+        ("CURVE", "Curve (TODO)", "Curve constraint"),
+    ])
+    center: bpy.props.FloatVectorProperty(name="Center", size=3, default=(0.0, 0.0, 0.0))
+    rotation: bpy.props.FloatVectorProperty(name="Rotation", size=3, default=(0.0, 0.0, 0.0))
+    # attribute_name: bpy.props.StringProperty(name="Attribute Name", default="Attribute Name")
+
+    def execute(self, context):
+        # Access the mesh data block
+        mesh = context.object.data
+
+        # Create a new constraint
+        new_constraint = mesh.ft_custom_constraints.add()
+        new_constraint.name = self.name
+        new_constraint.constraint_type = self.constraint_type
+
+        # new_constraint.center = self.center
+        # new_constraint.rotation = self.rotation
+        new_constraint.attribute_name = f"ft_constraint_{str(len(mesh.ft_custom_constraints) - 1).zfill(3)}"
+
+        # Set the newly added constraint as the active one
+        mesh.ft_custom_constraints_index = len(mesh.ft_custom_constraints) - 1
+        
+        fill_attribute_with_selection(new_constraint.attribute_name, mesh, type="FLOAT", domain="POINT")
+
+        return {'FINISHED'}
+
+    def invoke(self, context, event):
+        return context.window_manager.invoke_props_dialog(self)
+
+    def draw(self, context):
+        layout = self.layout
+        layout.prop(self, "name")
+        layout.prop(self, "constraint_type")
+        # layout.prop(self, "center")
+        # layout.prop(self, "rotation")
+        # layout.prop(self, "attribute_name")
+
+
+class DeleteConstraintOperator(bpy.types.Operator):
+    bl_idname = "object.final_topology_delete_constraint"
+    bl_label = "Delete Constraint"
+
+    def execute(self, context):
+        # Access the mesh data block
+        mesh = context.object.data
+
+        # Ensure there are constraints to delete
+        if mesh.ft_custom_constraints_index >= 0 and mesh.ft_custom_constraints_index < len(mesh.ft_custom_constraints):
+            # Remove the active constraint
+            constraint = mesh.ft_custom_constraints[mesh.ft_custom_constraints_index]
+
+            attribute = mesh.attributes.get(constraint.attribute_name)
+            try:
+                mesh.attributes.remove(attribute)
+            except:
+                print("Attribute for deleting not found")
+
+            mesh.ft_custom_constraints.remove(mesh.ft_custom_constraints_index)
+
+            # Ensure the active index is within bounds
+            if mesh.ft_custom_constraints_index >= len(mesh.ft_custom_constraints):
+                mesh.ft_custom_constraints_index = len(mesh.ft_custom_constraints) - 1
+
+        return {'FINISHED'}
+
+
+class CUSTOM_UL_list(bpy.types.UIList):
+    def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index):
+        custom_constraints = data.ft_custom_constraints
+        constraint = custom_constraints[index]
+
+        # Use layout to display the constraint properties
+        # layout.label(text=constraint.name)
+        layout.prop(constraint, "name", text="", emboss=False, icon='CONSTRAINT')
+        # layout.prop(constraint, "constraint_type")
+        # layout.prop(constraint, "center")
+        # layout.prop(constraint, "rotation")
+        # layout.prop(constraint, "attribute_name")
+
+classes =[
+        SlideOptimizeOperator,
+        # FunTopologyOperator,
+        FlattenSelectionOperator,
+        NormalLoopAlign,
+        FunTopologyDecimateOperator,
+        FreezeShape,
+        CustomConstraint,
+        AddConstraintOperator,
+        DeleteConstraintOperator,
+        CUSTOM_UL_list,
+        VIEW3D_PT_final_topology_constraints,
+    ]
+
+def register():
+    for cls in classes:
+        bpy.utils.register_class(cls)
+    bpy.types.Mesh.ft_custom_constraints = bpy.props.CollectionProperty(type=CustomConstraint)
+    bpy.types.Mesh.ft_custom_constraints_index = bpy.props.IntProperty('Actve FT Constraint', default=0)
+
+
+def unregister():
+    for cls in classes:
+        bpy.utils.unregister_class(cls)
+    del bpy.types.Mesh.ft_custom_constraints

@@ -3,8 +3,11 @@ from math import radians
 from bpy.types import Operator
 from bpy.props import  BoolProperty, IntProperty
 from mathutils import Vector
-from .draw import *
-from .utils import *
+# from .draw import *
+# from .utils import *
+import bmesh
+
+from . import draw,utils
 
 has_extras=True
 try:
@@ -152,7 +155,10 @@ def set_modifiers_start(obj):
             modifier.show_viewport = True
             modifier.show_in_editmode = True
             mod_settings['levels'] = modifier.levels
+            # Only support levels 1 and 2
             modifier.levels = min(2, modifier.levels)
+            modifier.levels = max(1, modifier.levels)
+
         modifiers_state_start.append(mod_settings)
 
     if len(obj.modifiers) == 0:
@@ -244,11 +250,11 @@ def process_vertex_raycast(i, bm_eval, offset_verts_hit_positions, user_preferen
         if difference.length < user_preferences.max_distance:
             # let's not draw radical overshoots that won't be counted anyway.
             color = (min(1, l), max(0, 1 - l), 0.0, 1.0)
-            add_arrow(world_source_position, hit_position, color,
+            draw.add_arrow(world_source_position, hit_position, color,
                       scale=user_preferences.arrow_scale)
 
             for f in res_v.link_faces:
-                add_face(f, obj, color)
+                draw.add_face(f, obj, color)
     else:
         difference = Vector((0, 0, 0))
 
@@ -324,7 +330,7 @@ def inverse_subdivide_step(self, context, target_objects, iterations=1, neighbou
     neighbors = get_neighbors_within_levels(selected_verts, neighbours)
 
     depsgraph = bpy.context.evaluated_depsgraph_get()
-    bm_eval = get_evaluated_bm(obj, depsgraph)
+    bm_eval = utils.get_evaluated_bm(obj, depsgraph)
 
     # we need to ray-cast every iteration.
     # let's get the neighbours for each vert separately on the subdivided mesh
@@ -344,12 +350,13 @@ def inverse_subdivide_step(self, context, target_objects, iterations=1, neighbou
         unique_indices.update(offset_verts_indices[v.index])
 
     for a in range(0, iterations):
-
+        if has_extras:
+            extras.evaluate_constraints(obj,bm)
         # we need to evaluate result subdivided mesh every iteration,
         # so need a fresh bm_eval, except for first iteration
         if a > 0:
             depsgraph = bpy.context.evaluated_depsgraph_get()
-            bm_eval = get_evaluated_bm(obj, depsgraph)
+            bm_eval = utils.get_evaluated_bm(obj, depsgraph)
 
         # we need to ray-cast every iteration.
         offset_verts_hit_positions = {}
@@ -358,6 +365,8 @@ def inverse_subdivide_step(self, context, target_objects, iterations=1, neighbou
             process_vertex_raycast(i, bm_eval, offset_verts_hit_positions, user_preferences, target_objects,
                                    obj)
 
+
+
         for v in neighbors:
             if offset_verts_indices.get(v.index) is None:
                 # TODO find out why sometimes the key isn't in the dict, otherwise this condition wouldn't be here.
@@ -365,6 +374,7 @@ def inverse_subdivide_step(self, context, target_objects, iterations=1, neighbou
             offset = calculate_offset(bm_eval, offset_verts_indices[v.index],
                                       offset_verts_hit_positions, v.index, user_preferences,
                                       target_objects, depsgraph)
+
 
             # align offset with vert normal.
             if offset.length > 0:
@@ -376,6 +386,8 @@ def inverse_subdivide_step(self, context, target_objects, iterations=1, neighbou
                     v_normal_offset = v.normal * offset.length
 
                 v.co += v_normal_offset
+
+
 
         bmesh.update_edit_mesh(me)
 
@@ -391,7 +403,7 @@ def get_target_objects(self):
                 target_objects.append(ob)
     elif user_preferences.use_object_or_collection == "OBJECT":
         tob = bpy.context.scene.inverse_subdivide_target_object
-        if tob is not None and tob.type == 'MESH':# and tob.visible_get():
+        if tob is not None and tob.type == 'MESH' and tob.hide_viewport is False:
             target_objects.append(tob)
 
     else:
@@ -426,8 +438,6 @@ class InverseSubdivideStep(Operator):
     )
 
     def execute(self, context):
-        global draw_lines
-        global draw_faces
         user_preferences = bpy.context.preferences.addons['final_topology'].preferences
 
         # check if there's subdivision modifier
@@ -442,9 +452,7 @@ class InverseSubdivideStep(Operator):
         #  this needs proper iteration of real neighbours, should actually try to find the 4 center vertices around if more levels are there.
         self.level_subs_neighbours = 1 * 2 ** (s_levels - 1)
 
-        draw_lines.clear()
-        draw_faces.clear()
-        draw_faces_list.clear()
+        draw.clear_draw_list()
         # just testing if constraints would be possible here.
         # bpy.ops.mesh.flatten_selection()
         tool_settings = context.tool_settings
@@ -497,9 +505,7 @@ class InverseSubdivideModal(Operator):
             bpy.types.SpaceView3D.draw_handler_remove(self._handle, 'WINDOW')
             bpy.types.SpaceView3D.draw_handler_remove(self._2d_handle, 'WINDOW')
             running_operator = None
-            draw_faces_list.clear()
-            draw_faces.clear()
-            draw_lines.clear()
+            draw.clear_draw_list()
             user_preferences.enable_operator = False
             set_modifiers_end(self.object, self.modifiers_state_start)
             return {'CANCELLED'}
@@ -507,8 +513,6 @@ class InverseSubdivideModal(Operator):
         return {'PASS_THROUGH'}
 
     def modal(self, context, event):
-        global draw_lines
-        global draw_faces
         user_preferences = bpy.context.preferences.addons['final_topology'].preferences
 
         # check if there's subdivision modifier
@@ -523,9 +527,7 @@ class InverseSubdivideModal(Operator):
             #  this needs proper iteration of real neighbours, should actually try to find the 4 center vertices around if more levels are there.
             self.level_subs_neighbours = 1 * 2 ** (s_levels - 1)
 
-            draw_lines.clear()
-            draw_faces.clear()
-            draw_faces_list.clear()
+            draw.clear_draw_list()
             # just testing if constraints would be possible here.
             # bpy.ops.mesh.flatten_selection()
             tool_settings = context.tool_settings
@@ -549,9 +551,8 @@ class InverseSubdivideModal(Operator):
         return self.handle_event(context, event, user_preferences)
 
     def invoke(self, context, event):
-
-        global draw_lines
         global running_operator
+
         user_preferences = bpy.context.preferences.addons['final_topology'].preferences
 
         # return if we are already running
@@ -560,15 +561,13 @@ class InverseSubdivideModal(Operator):
             running_operator = None
             return {'CANCELLED'}
 
-        draw_lines.clear()
-        draw_faces.clear()
-        draw_faces_list.clear()
+        draw.clear_draw_list()
 
         # Add the region OpenGL drawing callback
         # draw in view space with 'POST_VIEW' and 'PRE_VIEW'
         args = (self, context)
-        self._handle = bpy.types.SpaceView3D.draw_handler_add(draw_callback_px_3d, args, 'WINDOW', 'POST_VIEW')
-        self._2d_handle = bpy.types.SpaceView3D.draw_handler_add(draw_callback_px_2d, args, 'WINDOW', 'POST_PIXEL')
+        self._handle = bpy.types.SpaceView3D.draw_handler_add(draw.draw_callback_px_3d, args, 'WINDOW', 'POST_VIEW')
+        self._2d_handle = bpy.types.SpaceView3D.draw_handler_add(draw.draw_callback_px_2d, args, 'WINDOW', 'POST_PIXEL')
 
         # if user_preferences.always_on and user_preferences.use_timer:
         # We start timer always, but use it only when the setting is enabled
