@@ -90,9 +90,10 @@ class NormalLoopAlign(Operator):
                                  use_proportional_edit=False)
         return {'FINISHED'}
 
-def flatten_verts(verts, method="best_fit", slide=False):
+def flatten_verts(verts, method="best_fit", slide=False, center=None, normal=None):
     # Estimate the best fit plane
-    center, normal = estimate_best_fit_plane(verts, method)
+    if center is None or normal is None:
+        center, normal = estimate_best_fit_plane(verts, method)
 
     # Define a function to get the intersection point of a line with the plane
     def line_plane_intersection(line_start, line_end, plane_point, plane_normal):
@@ -559,6 +560,10 @@ def evaluate_constraints(object,bm):
             plane_verts = get_attribute_elements(object, bm,c.attribute_name)
             if len(plane_verts)>2:
                 flatten_verts(plane_verts, slide=False, method='best_fit')
+        elif c.constraint_type == 'PLANEFIXED':
+            plane_verts = get_attribute_elements(object, bm,c.attribute_name)
+            if len(plane_verts)>2:
+                flatten_verts(plane_verts, slide=False, method='fixed', center=Vector(c.center), normal=Vector(c.normal))
 
 def activate_object(ob):
     bpy.ops.object.select_all(action='DESELECT')
@@ -648,7 +653,7 @@ class FunTopologyDecimateOperator(bpy.types.Operator):
             global draw_faces
             user_preferences = bpy.context.preferences.addons['final_topology'].preferences
 
-            draw.clear_draw_list
+            draw.clear_draw_list()
             tool_settings = context.tool_settings
             bpy.context.view_layer.update()
 
@@ -701,7 +706,7 @@ class CustomConstraint(bpy.types.PropertyGroup):
         ("CURVE", "Curve (TODO)", "Curve constraint"),
     ])
     center: bpy.props.FloatVectorProperty(name="Center", size=3)
-    rotation: bpy.props.FloatVectorProperty(name="Rotation", size=3)
+    normal: bpy.props.FloatVectorProperty(name="Normal", size=3)
     attribute_name: bpy.props.StringProperty(name="Attribute Name")
 
 
@@ -758,7 +763,7 @@ class AddConstraintOperator(bpy.types.Operator):
         ("CURVE", "Curve (TODO)", "Curve constraint"),
     ])
     center: bpy.props.FloatVectorProperty(name="Center", size=3, default=(0.0, 0.0, 0.0))
-    rotation: bpy.props.FloatVectorProperty(name="Rotation", size=3, default=(0.0, 0.0, 0.0))
+    normal: bpy.props.FloatVectorProperty(name="Normal", size=3, default=(0.0, 0.0, 0.0))
     # attribute_name: bpy.props.StringProperty(name="Attribute Name", default="Attribute Name")
 
     def execute(self, context):
@@ -771,12 +776,19 @@ class AddConstraintOperator(bpy.types.Operator):
         new_constraint.constraint_type = self.constraint_type
 
         # new_constraint.center = self.center
-        # new_constraint.rotation = self.rotation
+        # new_constraint.normal = self.normal
         new_constraint.attribute_name = f"ft_constraint_{str(len(mesh.ft_custom_constraints) - 1).zfill(3)}"
 
         # Set the newly added constraint as the active one
         mesh.ft_custom_constraints_index = len(mesh.ft_custom_constraints) - 1
-        
+        if self.constraint_type == "PLANEFIXED":
+            bm = bmesh.from_edit_mesh(mesh)
+
+            # Get the selected vertices
+            selected_verts = [v for v in bm.verts if v.select]
+            center, normal = estimate_best_fit_plane(selected_verts, "best_fit")
+            new_constraint.center = center
+            new_constraint.normal = normal
         fill_attribute_with_selection(new_constraint.attribute_name, mesh, type="FLOAT", domain="POINT")
 
         return {'FINISHED'}
@@ -789,7 +801,7 @@ class AddConstraintOperator(bpy.types.Operator):
         layout.prop(self, "name")
         layout.prop(self, "constraint_type")
         # layout.prop(self, "center")
-        # layout.prop(self, "rotation")
+        # layout.prop(self, "normal")
         # layout.prop(self, "attribute_name")
 
 
@@ -831,7 +843,7 @@ class CUSTOM_UL_list(bpy.types.UIList):
         layout.prop(constraint, "name", text="", emboss=False, icon='CONSTRAINT')
         # layout.prop(constraint, "constraint_type")
         # layout.prop(constraint, "center")
-        # layout.prop(constraint, "rotation")
+        # layout.prop(constraint, "normal")
         # layout.prop(constraint, "attribute_name")
 
 classes =[
