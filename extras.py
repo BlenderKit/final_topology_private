@@ -11,6 +11,7 @@ up = Vector((0, 0, 1))
 from bpy.types import Operator
 from bpy.props import IntProperty, FloatProperty
 from math import pi, atan2
+from random import random
 from . import draw
 def estimate_best_fit_plane(verts, method="best_fit"):
     """
@@ -538,8 +539,8 @@ def find_longest_shared_edges(bm, only_triangles=False):
 
     return longest_shared_edges
 
-def get_attribute_elements(object, bm, attribute_name):
-    attribute_layer =  bm.verts.layers.float[attribute_name]
+def get_attribute_elements(object, bm, constraint):
+    attribute_layer =  bm.verts.layers.float[constraint.attribute_name]
     return_elements = []
     ob_matrix_world = object.matrix_world
     # Transform vertex coordinates to world space
@@ -550,18 +551,19 @@ def get_attribute_elements(object, bm, attribute_name):
             # draw.add_point(vert.co,draw.RED)
             world_vert_position = ob_matrix_world @ vert.co
             world_normal_direction = ob_matrix_world @ (vert.co + vert.normal*0.01)
-            draw.add_line(world_vert_position,world_normal_direction,draw.YELLOW)
+            draw.add_line(world_vert_position,world_normal_direction,(constraint.color[0],constraint.color[1],constraint.color[2],1.0))
     return return_elements
+
 def evaluate_constraints(object,bm):
     cs = object.data.ft_custom_constraints
     for c in cs:
         # print('evaluating constraint',c.name)
         if c.constraint_type == 'PLANE':
-            plane_verts = get_attribute_elements(object, bm,c.attribute_name)
+            plane_verts = get_attribute_elements(object, bm,c)
             if len(plane_verts)>2:
                 flatten_verts(plane_verts, slide=False, method='best_fit')
         elif c.constraint_type == 'PLANEFIXED':
-            plane_verts = get_attribute_elements(object, bm,c.attribute_name)
+            plane_verts = get_attribute_elements(object, bm,c)
             if len(plane_verts)>2:
                 flatten_verts(plane_verts, slide=False, method='fixed', center=Vector(c.center), normal=Vector(c.normal))
 
@@ -708,7 +710,7 @@ class CustomConstraint(bpy.types.PropertyGroup):
     center: bpy.props.FloatVectorProperty(name="Center", size=3)
     normal: bpy.props.FloatVectorProperty(name="Normal", size=3)
     attribute_name: bpy.props.StringProperty(name="Attribute Name")
-
+    color: bpy.props.FloatVectorProperty(name="Color", size=3, default=(1.0, 0.0, 0.0), subtype='COLOR')
 
 class VIEW3D_PT_final_topology_constraints(bpy.types.Panel):
     bl_label = "Constraints"
@@ -733,7 +735,10 @@ class VIEW3D_PT_final_topology_constraints(bpy.types.Panel):
         ac = mesh.ft_custom_constraints[mesh.ft_custom_constraints_index]
         layout.prop(ac, "name")
         layout.prop(ac, "constraint_type")
-
+        if ac.constraint_type == "PLANEFIXED":
+            layout.prop(ac, "center")
+            layout.prop(ac, "normal")
+            layout.prop_search(ac, "attribute_name", mesh, "attributes", text="Attribute")
 
 
 import bpy
@@ -790,6 +795,7 @@ class AddConstraintOperator(bpy.types.Operator):
             new_constraint.center = center
             new_constraint.normal = normal
         fill_attribute_with_selection(new_constraint.attribute_name, mesh, type="FLOAT", domain="POINT")
+        new_constraint.color = (random(), random(), random())
 
         return {'FINISHED'}
 

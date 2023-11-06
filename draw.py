@@ -168,7 +168,7 @@ def draw_callback_px_3d(self, context):
         # print('line sets', len(draw_lines))
         for col, lines in draw_lines.items():
             batch = batch_for_shader(shader, 'LINES', {"pos": lines})
-            col_with_alpha = (col[0], col[1], col[2], 0.25)
+            col_with_alpha = (col[0], col[1], col[2], col[3])
 
             shader.uniform_float("color", col_with_alpha)
 
@@ -185,7 +185,7 @@ def draw_callback_px_3d(self, context):
 
             # Create the batch
             batch = batch_for_shader(shader, 'TRIS', {"pos": tris})
-            col_with_alpha = (col[0], col[1], col[2], 0.1)
+            col_with_alpha = (col[0], col[1], col[2], col[3])
             shader.uniform_float("color", col_with_alpha)
             batch.draw(shader)
 
