@@ -144,10 +144,16 @@ class InverseSubdivideAddonPreferences(AddonPreferences):
         default=True,
         description="Toggle to enable or disable drawing of arrows"
     )
-    enable_draw_arrows: BoolProperty(
-        name="Draw Arrows",
+    enable_draw_constraints: BoolProperty(
+        name="Draw Constraints",
         default=True,
-        description="Toggle to enable or disable drawing of arrows"
+        description="Toggle to enable or disable drawing of constraints"
+    )
+    overlays_alpha: FloatProperty(
+        name="Overlays Alpha",
+        default=0.5,
+        min=0, max=1,
+        description="Alpha of the overlays"
     )
     # Enum property
     use_object_or_collection: EnumProperty(
@@ -229,15 +235,35 @@ def inverse_subdivide_UI_draw(self, context):
         layout.prop(user_preferences, "iterations")
         layout.prop(user_preferences, "neighbours")
     layout.prop(user_preferences, "max_distance")
+    if has_extras:
+        layout.prop(user_preferences, "weight_algorithm")
 
-    layout.separator()
-    layout.label(text="Drawing Overlays:")
-    layout.prop(user_preferences, "enable_draw_arrows")
-    if user_preferences.enable_draw_arrows:
-        layout.prop(user_preferences, "arrow_scale")
-    layout.prop(user_preferences, "enable_draw_faces")
-    layout.prop(user_preferences, "gradient_sensitivity_distance")
-    layout.prop(user_preferences, "weight_algorithm")
+
+
+class VIEW3D_PT_final_topology_overlays(Panel):
+    bl_category = "Final topology"
+    bl_idname = "VIEW3D_PT_final_topology_objectmode"
+    bl_space_type = "VIEW_3D"
+    bl_region_type = "UI"
+    bl_label = "Draw Overlays"
+    bl_parent_id = "VIEW3D_PT_final_topology_editmode"
+    bl_options = {"DEFAULT_CLOSED"}
+
+    def draw(self, context):
+        layout = self.layout
+        user_preferences = bpy.context.preferences.addons[__name__].preferences
+
+        layout.prop(user_preferences, "overlays_alpha")
+        layout.separator
+        row = layout.row()
+        row.prop(user_preferences, "enable_draw_arrows", toggle=True, text="", icon='EMPTY_SINGLE_ARROW')
+        row.prop(user_preferences, "arrow_scale", text="Scale")
+
+        row = layout.row()
+        row.prop(user_preferences, "enable_draw_faces", toggle=True, text="", icon='FACESEL')
+        row.prop(user_preferences, "gradient_sensitivity_distance", text= 'Sensitivity')
+        if has_extras:
+            layout.prop(user_preferences, "enable_draw_constraints", toggle=True, text="Constraints", icon='CONSTRAINT')
 
 
 # separate UI panel in the side bar
@@ -313,6 +339,7 @@ classes = [InverseSubdivideModal,
            PopupDialog,
            VIEW3D_PT_final_topology_editmode,
            VIEW3D_PT_final_topology_objectmode,
+           VIEW3D_PT_final_topology_overlays,
 
            ]
 

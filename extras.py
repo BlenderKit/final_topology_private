@@ -13,6 +13,8 @@ from bpy.props import IntProperty, FloatProperty
 from math import pi, atan2
 from random import random
 from . import draw
+
+
 def estimate_best_fit_plane(verts, method="best_fit"):
     """
     Estimate the best fit plane for a given set of vertices.
@@ -90,6 +92,7 @@ class NormalLoopAlign(Operator):
                                  orient_matrix_type='NORMAL', mirror=True,
                                  use_proportional_edit=False)
         return {'FINISHED'}
+
 
 def flatten_verts(verts, method="best_fit", slide=False, center=None, normal=None):
     # Estimate the best fit plane
@@ -370,7 +373,6 @@ class SlideOptimizeOperator(bpy.types.Operator):
         #        me= ob.data
         #        bm = bmesh.from_edit_mesh(me)
         self.restore_init_positions()
-        print(iterations)
         self.opti_slide_get_slide_verts(iterations=iterations)
 
     #        bmesh.update_edit_mesh(me)
@@ -411,9 +413,9 @@ class SlideOptimizeOperator(bpy.types.Operator):
         return {'RUNNING_MODAL'}
 
     def invoke(self, context, event):
-        if context.object:
+        if context.active_object:
             self.first_mouse_x = event.mouse_x
-            self.first_value = context.object.location.x
+            self.first_value = context.active_object.location.x
             self.store_init_positions()
             self.slide_verts = self.opti_slide_get_slide_verts()
 
@@ -422,8 +424,6 @@ class SlideOptimizeOperator(bpy.types.Operator):
         else:
             self.report({'WARNING'}, "No active object, could not finish")
             return {'CANCELLED'}
-
-
 
 
 # class FunTopologyOperator(bpy.types.Operator):
@@ -493,7 +493,6 @@ class SlideOptimizeOperator(bpy.types.Operator):
 #         context.window_manager.event_timer_remove(self.timer)
 
 
-
 def find_longest_shared_edges(bm, only_triangles=False):
     longest_shared_edges = []
 
@@ -539,54 +538,74 @@ def find_longest_shared_edges(bm, only_triangles=False):
 
     return longest_shared_edges
 
+
 def get_attribute_elements(object, bm, constraint):
-    attribute_layer =  bm.verts.layers.float[constraint.attribute_name]
+    # get all elements with attribute value 1.0, also add them to draw list
+    user_preferences = bpy.context.preferences.addons['final_topology'].preferences
+
+    attribute_layer = bm.verts.layers.float[constraint.attribute_name]
     return_elements = []
     ob_matrix_world = object.matrix_world
     # Transform vertex coordinates to world space
     for vert in bm.verts:
-        val= vert[attribute_layer]
+        val = vert[attribute_layer]
         if val == 1.0:
             return_elements.append(vert)
-            # draw.add_point(vert.co,draw.RED)
-            world_vert_position = ob_matrix_world @ vert.co
-            world_normal_direction = ob_matrix_world @ (vert.co + vert.normal*0.01)
-            draw.add_line(world_vert_position,world_normal_direction,(constraint.color[0],constraint.color[1],constraint.color[2],1.0))
+
+    if not user_preferences.enable_draw_constraints:
+        return return_elements
+
+    alpha = 0.1
+    color = (constraint.color[0], constraint.color[1], constraint.color[2], alpha)
+    if object.data.ft_custom_constraints[object.data.ft_custom_constraints_index] == constraint:
+        alpha = 0.4
+        color = (
+        max(constraint.color[0] * 2, 0.6), max(constraint.color[1] * 2, 0.6), max(constraint.color[2] * 2, 0.6), alpha)
+    for e in bm.edges:
+        if e.verts[0] in return_elements and e.verts[1] in return_elements:
+            world_vert_position = ob_matrix_world @ e.verts[0].co
+            world_vert_position2 = ob_matrix_world @ e.verts[1].co
+            draw.add_line(world_vert_position, world_vert_position2,
+                          color)
     return return_elements
 
-def evaluate_constraints(object,bm):
+
+def evaluate_constraints(object, bm):
     cs = object.data.ft_custom_constraints
     for c in cs:
         # print('evaluating constraint',c.name)
         if c.constraint_type == 'PLANE':
-            plane_verts = get_attribute_elements(object, bm,c)
-            if len(plane_verts)>2:
+            plane_verts = get_attribute_elements(object, bm, c)
+            if len(plane_verts) > 2:
                 flatten_verts(plane_verts, slide=False, method='best_fit')
         elif c.constraint_type == 'PLANEFIXED':
-            plane_verts = get_attribute_elements(object, bm,c)
-            if len(plane_verts)>2:
-                flatten_verts(plane_verts, slide=False, method='fixed', center=Vector(c.center), normal=Vector(c.normal))
+            plane_verts = get_attribute_elements(object, bm, c)
+            if len(plane_verts) > 2:
+                flatten_verts(plane_verts, slide=False, method='fixed', center=Vector(c.center),
+                              normal=Vector(c.normal))
+
 
 def activate_object(ob):
     bpy.ops.object.select_all(action='DESELECT')
     ob.select_set(True)
     bpy.context.view_layer.objects.active = ob
 
+
 def create_freeze_mesh_object():
     orig_ob = bpy.context.active_object
-    orig_mode=bpy.context.mode
+    orig_mode = bpy.context.mode
     bpy.ops.object.mode_set(mode='OBJECT')
     bpy.ops.object.duplicate()
-    freeze_mesh_object=bpy.context.active_object
-    freeze_mesh_object.name='FROZEN_MESH_STATE'
-    freeze_mesh_object.name='FROZEN_MESH_STATE' #double setting name removes the .001s
+    freeze_mesh_object = bpy.context.active_object
+    freeze_mesh_object.name = 'FROZEN_MESH_STATE'
+    freeze_mesh_object.name = 'FROZEN_MESH_STATE'  # double setting name removes the .001s
 
     for m in freeze_mesh_object.modifiers:
         if m.type != 'MIRROR':
-            m.show_viewport=False
-            m.show_render=False
+            m.show_viewport = False
+            m.show_render = False
     # freeze_mesh_object.modifiers.clear()
-    #hide the object
+    # hide the object
     # freeze_mesh_object.hide_viewport = True
     freeze_mesh_object.hide_set(True)
 
@@ -596,17 +615,18 @@ def create_freeze_mesh_object():
     m.levels = 5
     activate_object(orig_ob)
     bpy.ops.object.mode_set(mode='EDIT')
-    prefs=bpy.context.preferences.addons['final_topology'].preferences
+    prefs = bpy.context.preferences.addons['final_topology'].preferences
     prefs.use_object_or_collection = "OBJECT"
     bpy.context.scene.inverse_subdivide_target_object = freeze_mesh_object
     return freeze_mesh_object
 
+
 def delete_frozen_mesh():
-    prefs=bpy.context.preferences.addons['final_topology'].preferences
+    prefs = bpy.context.preferences.addons['final_topology'].preferences
     # bpy.ops.object.mode_set(mode='OBJECT')
 
     # bpy.ops.object.select_all(action='DESELECT')
-    object=bpy.data.objects.get('FROZEN_MESH_STATE')
+    object = bpy.data.objects.get('FROZEN_MESH_STATE')
     if object is not None:
         bpy.data.objects.remove(object)
     # bpy.ops.object.mode_set(mode='EDIT')
@@ -617,12 +637,14 @@ def delete_frozen_mesh():
     # bpy.data.meshes.remove(object.data)
     # bpy.data.objects.remove(object)
 
+
 class FreezeShape(bpy.types.Operator):
     bl_idname = "mesh.freeze_shape"
     bl_label = "Freeze Subdiv Shape"
     bl_description = "Freeze Subdiv Shape while you change the models topology." \
                      "\nCreates a copy of self and switches on snapping to it."
     bl_options = {'REGISTER', 'UNDO'}
+
     def execute(self, context):
         object = bpy.data.objects.get('FROZEN_MESH_STATE')
         if object is not None:
@@ -630,6 +652,7 @@ class FreezeShape(bpy.types.Operator):
         else:
             create_freeze_mesh_object()
         return {'FINISHED'}
+
 
 class FunTopologyDecimateOperator(bpy.types.Operator):
     bl_idname = "mesh.fun_topology_decimate"
@@ -699,12 +722,27 @@ class FunTopologyDecimateOperator(bpy.types.Operator):
         context.window_manager.event_timer_remove(self.timer)
 
 
+def update_constraint_index(self, context):
+    # select constraint vertices
+    constraint = context.object.data.ft_custom_constraints[context.object.data.ft_custom_constraints_index]
+    bm = bmesh.from_edit_mesh(context.object.data)
+    verts = get_attribute_elements(context.object, bm, constraint)
+    if len(verts)>0:
+        bpy.ops.mesh.select_all(action='DESELECT')
+
+        for v in verts:
+            v.select = True
+        for e in bm.edges:
+            if e.verts[0] in verts and e.verts[1] in verts:
+                e.select = True
+
+
 class CustomConstraint(bpy.types.PropertyGroup):
     name: bpy.props.StringProperty(name="Name")
     constraint_type: bpy.props.EnumProperty(name="Type", default="PLANE", items=
     [
         ("PLANE", "Plane", "Planar constraint"),
-        ("PLANEFIXED", "Plane Fixed (TODO)", "Planar constraint fixed"),
+        ("PLANEFIXED", "Plane Fixed", "Planar constraint fixed"),
         ("CURVE", "Curve (TODO)", "Curve constraint"),
     ])
     center: bpy.props.FloatVectorProperty(name="Center", size=3)
@@ -712,19 +750,18 @@ class CustomConstraint(bpy.types.PropertyGroup):
     attribute_name: bpy.props.StringProperty(name="Attribute Name")
     color: bpy.props.FloatVectorProperty(name="Color", size=3, default=(1.0, 0.0, 0.0), subtype='COLOR')
 
+
 class VIEW3D_PT_final_topology_constraints(bpy.types.Panel):
     bl_label = "Constraints"
     bl_idname = "VIEW3D_PT_final_topology_constraints"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = 'Final topology'
+    bl_category = 'Final topoljogy'
     bl_parent_id = "VIEW3D_PT_final_topology_editmode"
 
     def draw(self, context):
         layout = self.layout
-        mesh = context.object.data
-
-        ft_custom_constraints = mesh.ft_custom_constraints
+        mesh = context.active_object.data
 
         row = layout.row()
         row.template_list("CUSTOM_UL_list", "", mesh, "ft_custom_constraints", mesh, "ft_custom_constraints_index")
@@ -738,43 +775,54 @@ class VIEW3D_PT_final_topology_constraints(bpy.types.Panel):
         if ac.constraint_type == "PLANEFIXED":
             layout.prop(ac, "center")
             layout.prop(ac, "normal")
-            layout.prop_search(ac, "attribute_name", mesh, "attributes", text="Attribute")
 
 
 import bpy
 
-def fill_attribute_with_selection(attribute_name, mesh, type="FLOAT", domain="POINT"):
+
+def fill_attribute_with_selection(attribute_name, mesh, type="FLOAT", domain="POINT", new = False):
     bm = bmesh.from_edit_mesh(mesh)
     values = [v.select for v in bm.verts]
     bpy.ops.object.mode_set(mode="OBJECT")
     # do this in object mode now
+
     attribute = mesh.attributes.get(attribute_name)
-    if attribute is None:
+    if attribute is None or new:
         attribute = mesh.attributes.new(name=attribute_name, type="FLOAT", domain="POINT")
     attribute.data.foreach_set("value", values)
 
     bpy.ops.object.mode_set(mode="EDIT")
+    return attribute.name
 
 
 class AddConstraintOperator(bpy.types.Operator):
     bl_idname = "object.final_topology_add_constraint"
     bl_label = "Add Constraint"
+    bl_options = {'REGISTER', 'UNDO'}
 
     name: bpy.props.StringProperty(name="Name", default='Constraint')
     constraint_type: bpy.props.EnumProperty(name="Type", default="PLANE", items=
     [
         ("PLANE", "Plane", "Planar constraint"),
-        ("PLANEFIXED", "Plane Fixed (TODO)", "Planar constraint fixed"),
+        ("PLANEFIXED", "Plane Fixed", "Planar constraint fixed"),
         ("CURVE", "Curve (TODO)", "Curve constraint"),
     ])
     center: bpy.props.FloatVectorProperty(name="Center", size=3, default=(0.0, 0.0, 0.0))
     normal: bpy.props.FloatVectorProperty(name="Normal", size=3, default=(0.0, 0.0, 0.0))
+
     # attribute_name: bpy.props.StringProperty(name="Attribute Name", default="Attribute Name")
 
     def execute(self, context):
         # Access the mesh data block
-        mesh = context.object.data
+        mesh = context.active_object.data
 
+        bm = bmesh.from_edit_mesh(mesh)
+
+        # Get the selected vertices
+        selected_verts = [v for v in bm.verts if v.select]
+        if len(selected_verts) == 0:
+            self.report({'ERROR'}, "No vertices selected")
+            return {'CANCELLED'}
         # Create a new constraint
         new_constraint = mesh.ft_custom_constraints.add()
         new_constraint.name = self.name
@@ -782,19 +830,22 @@ class AddConstraintOperator(bpy.types.Operator):
 
         # new_constraint.center = self.center
         # new_constraint.normal = self.normal
-        new_constraint.attribute_name = f"ft_constraint_{str(len(mesh.ft_custom_constraints) - 1).zfill(3)}"
+        attribute_name = f"ft_constraint"
 
         # Set the newly added constraint as the active one
         mesh.ft_custom_constraints_index = len(mesh.ft_custom_constraints) - 1
-        if self.constraint_type == "PLANEFIXED":
-            bm = bmesh.from_edit_mesh(mesh)
+        if self.constraint_type == "PLANEFIXED" or self.constraint_type == "PLANE":
+            # get fixed plane from selection for constraints
 
-            # Get the selected vertices
-            selected_verts = [v for v in bm.verts if v.select]
             center, normal = estimate_best_fit_plane(selected_verts, "best_fit")
             new_constraint.center = center
             new_constraint.normal = normal
-        fill_attribute_with_selection(new_constraint.attribute_name, mesh, type="FLOAT", domain="POINT")
+
+        attribute_name = fill_attribute_with_selection(attribute_name, mesh, type="FLOAT",
+                                                       domain="POINT", new = True)
+        # we name the attribute after its creation, since we couldn't be sure about it's .00x ending
+        new_constraint.attribute_name = attribute_name
+
         new_constraint.color = (random(), random(), random())
 
         return {'FINISHED'}
@@ -814,10 +865,11 @@ class AddConstraintOperator(bpy.types.Operator):
 class DeleteConstraintOperator(bpy.types.Operator):
     bl_idname = "object.final_topology_delete_constraint"
     bl_label = "Delete Constraint"
+    bl_options = {'REGISTER', 'UNDO'}
 
     def execute(self, context):
         # Access the mesh data block
-        mesh = context.object.data
+        mesh = context.active_object.data
 
         # Ensure there are constraints to delete
         if mesh.ft_custom_constraints_index >= 0 and mesh.ft_custom_constraints_index < len(mesh.ft_custom_constraints):
@@ -852,25 +904,28 @@ class CUSTOM_UL_list(bpy.types.UIList):
         # layout.prop(constraint, "normal")
         # layout.prop(constraint, "attribute_name")
 
-classes =[
-        SlideOptimizeOperator,
-        # FunTopologyOperator,
-        FlattenSelectionOperator,
-        NormalLoopAlign,
-        FunTopologyDecimateOperator,
-        FreezeShape,
-        CustomConstraint,
-        AddConstraintOperator,
-        DeleteConstraintOperator,
-        CUSTOM_UL_list,
-        VIEW3D_PT_final_topology_constraints,
-    ]
+
+classes = [
+    SlideOptimizeOperator,
+    # FunTopologyOperator,
+    FlattenSelectionOperator,
+    NormalLoopAlign,
+    FunTopologyDecimateOperator,
+    FreezeShape,
+    CustomConstraint,
+    AddConstraintOperator,
+    DeleteConstraintOperator,
+    CUSTOM_UL_list,
+    VIEW3D_PT_final_topology_constraints,
+]
+
 
 def register():
     for cls in classes:
         bpy.utils.register_class(cls)
     bpy.types.Mesh.ft_custom_constraints = bpy.props.CollectionProperty(type=CustomConstraint)
-    bpy.types.Mesh.ft_custom_constraints_index = bpy.props.IntProperty('Actve FT Constraint', default=0)
+    bpy.types.Mesh.ft_custom_constraints_index = bpy.props.IntProperty('Actve FT Constraint', default=0,
+                                                                       update=update_constraint_index)
 
 
 def unregister():

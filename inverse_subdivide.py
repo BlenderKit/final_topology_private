@@ -249,7 +249,7 @@ def process_vertex_raycast(i, bm_eval, offset_verts_hit_positions, user_preferen
         l = difference.length / user_preferences.gradient_sensitivity_distance
         if difference.length < user_preferences.max_distance:
             # let's not draw radical overshoots that won't be counted anyway.
-            color = (min(1, l), max(0, 1 - l), 0.0, 1.0)
+            color = (min(1, l), max(0, 1 - l), 0.0, 0.1)
             draw.add_arrow(world_source_position, hit_position, color,
                       scale=user_preferences.arrow_scale)
 
@@ -350,6 +350,8 @@ def inverse_subdivide_step(self, context, target_objects, iterations=1, neighbou
         unique_indices.update(offset_verts_indices[v.index])
 
     for a in range(0, iterations):
+        draw.clear_draw_list()
+        
         if has_extras:
             extras.evaluate_constraints(obj,bm)
         # we need to evaluate result subdivided mesh every iteration,

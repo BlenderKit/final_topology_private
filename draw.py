@@ -25,13 +25,10 @@ def clear_draw_list():
     global draw_faces
     global draw_points
     global draw_faces_list
-    print('clearing draw list')
-    print(len(draw_lines.items()))
     draw_lines.clear()
     draw_faces.clear()
     draw_points.clear()
     draw_faces_list.clear()
-    print(len(draw_lines.items()))
 
 
 def add_line(v1, v2, col):
@@ -58,6 +55,9 @@ def add_arrow(v1, v2, col, scale=3):
         Add an arrow to the draw list
     '''
     global draw_lines
+    direction = v2 - v1
+    if direction.length < 0.0001:
+        return
     col = (round(col[0], 1), round(col[1], 1), round(col[2], 1), round(col[3], 1))
 
     user_preferences = bpy.context.preferences.addons['final_topology'].preferences
@@ -65,7 +65,6 @@ def add_arrow(v1, v2, col, scale=3):
         return
     arrow_length_fraction = 0.5
     arrow_width_fraction = 0.5
-    direction = v2 - v1
     v2 = v1 + direction * scale
 
     line_set = draw_lines.get(col, [])
@@ -164,11 +163,11 @@ def draw_callback_px_3d(self, context):
     gpu.state.line_width_set(4.0)
 
     user_preferences = bpy.context.preferences.addons['final_topology'].preferences
-    if user_preferences.enable_draw_arrows:
+    if user_preferences.enable_draw_arrows or user_preferences.enable_draw_constraints:
         # print('line sets', len(draw_lines))
         for col, lines in draw_lines.items():
             batch = batch_for_shader(shader, 'LINES', {"pos": lines})
-            col_with_alpha = (col[0], col[1], col[2], col[3])
+            col_with_alpha = (col[0], col[1], col[2], col[3]*user_preferences.overlays_alpha)
 
             shader.uniform_float("color", col_with_alpha)
 
@@ -185,7 +184,7 @@ def draw_callback_px_3d(self, context):
 
             # Create the batch
             batch = batch_for_shader(shader, 'TRIS', {"pos": tris})
-            col_with_alpha = (col[0], col[1], col[2], col[3])
+            col_with_alpha = (col[0], col[1], col[2], col[3]*user_preferences.overlays_alpha)
             shader.uniform_float("color", col_with_alpha)
             batch.draw(shader)
 
