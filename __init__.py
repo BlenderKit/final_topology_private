@@ -17,18 +17,22 @@ has_extras = True
 if "bpy" in locals():
     try:
         extras = reload(extras)
-    except:
+    except Exception as e:
         has_extras = False
+        print(e)
+
     inverse_subdivide = reload(inverse_subdivide)
     draw = reload(draw)
     utils = reload(utils)
 else:
     from .inverse_subdivide import *
+
     try:
         from .extras import *
         from . import extras
-    except:
+    except Exception as e:
         has_extras = False
+        print(e)
 
     from . import inverse_subdivide
     from . import draw
@@ -44,8 +48,6 @@ from bpy.props import (
 )
 from bpy.types import AddonPreferences, Operator, Panel
 import bpy
-
-
 
 
 class PopupDialog(bpy.types.Operator):
@@ -70,6 +72,7 @@ class PopupDialog(bpy.types.Operator):
     def execute(self, context):
         wm = bpy.context.window_manager
         return wm.invoke_popup(self, width=self.width)
+
 
 class InverseSubdivideAddonPreferences(AddonPreferences):
     bl_idname = __name__
@@ -120,7 +123,7 @@ class InverseSubdivideAddonPreferences(AddonPreferences):
     gradient_sensitivity_distance: FloatProperty(
         name="Gradient Sensitivity",
         default=.02,
-        min=0, max=1,
+        min=0.0001, max=1,
         description="Color gradient sensitivity, anything over this distance will be strictly red",
         precision=10,
         unit='LENGTH'
@@ -170,12 +173,12 @@ class InverseSubdivideAddonPreferences(AddonPreferences):
     weight_algorithm: EnumProperty(
         name="Weight Algorithm",
         items=[
-            ('ALL1', "All 1", "All considered verts have weight 1"),
-            ('FIRST', "First 1 ", "Main vert has 1, others split 1"),
-            ('FIRSTONLY', "Only first", "Main vert has 1, no midverts counted"),
-            ('FIRSTDIST', "First has 1 + distance", "Main vert has 1, others split 1 with distance weight"),
+            ('ALL1', "All same", "Vertex and edge midpoints have same weight"),
+            ('FIRST', "Control vertex more importance", "Vertex has weight 1, edge midpoints share weight 1/n"),
+            ('FIRSTONLY', "Only vertices, no edges", "Only vertices are used, no edge midpoints"),
+            ('FIRSTDIST', "Distance", "Edge midpoints are weighted by distance to main vert"),
         ],
-        default='FIRSTONLY',
+        default='ALL1',
         description="Choose whether to use distance or edge length for weighting."
     )
     normal_direction: EnumProperty(
@@ -188,14 +191,16 @@ class InverseSubdivideAddonPreferences(AddonPreferences):
         description="choose which normal is used for the offset."
     )
 
+
 def inverse_subdivide_UI_draw(self, context):
+    # Draw UI elements
     if not poll_inverse_subdivide(self, context):
         return
 
     user_preferences = bpy.context.preferences.addons[__name__].preferences
     layout = self.layout
-    layout.separator()
-    layout.separator()
+
+    layout.operator(InverseSubdivideStep.bl_idname, text="Inverse Subdivide Step", icon='MOD_SUBSURF')
 
     if user_preferences.enable_operator:
         layout.operator(InverseSubdivideModal.bl_idname, text="Inverse Subdsurf Modal", icon='MOD_SUBSURF', emboss=True,
@@ -210,7 +215,7 @@ def inverse_subdivide_UI_draw(self, context):
     layout.prop(user_preferences, "always_on", toggle=True, icon='MOD_TIME')
     if user_preferences.always_on:
         layout.prop(user_preferences, "use_timer", toggle=False, icon='TIME')
-    if has_extras:
+
         layout.separator()
         layout.label(text='Snap to')
         if bpy.data.objects.get("FROZEN_MESH_STATE") is not None:
@@ -230,19 +235,18 @@ def inverse_subdivide_UI_draw(self, context):
                 # Scene option, no need to display anything
                 pass
 
-
-        layout.separator()
-        layout.prop(user_preferences, "iterations")
-        layout.prop(user_preferences, "neighbours")
+        if has_extras:
+            layout.separator()
+            layout.prop(user_preferences, "iterations")
+            layout.prop(user_preferences, "neighbours")
     layout.prop(user_preferences, "max_distance")
     if has_extras:
         layout.prop(user_preferences, "weight_algorithm")
 
 
-
 class VIEW3D_PT_final_topology_overlays(Panel):
-    bl_category = "Final topology"
-    bl_idname = "VIEW3D_PT_final_topology_objectmode"
+    bl_category = "Edit"
+    bl_idname = "VIEW3D_PT_final_topology_overlays"
     bl_space_type = "VIEW_3D"
     bl_region_type = "UI"
     bl_label = "Draw Overlays"
@@ -254,22 +258,36 @@ class VIEW3D_PT_final_topology_overlays(Panel):
         user_preferences = bpy.context.preferences.addons[__name__].preferences
 
         layout.prop(user_preferences, "overlays_alpha")
-        layout.separator
+        layout.separator()
         row = layout.row()
         row.prop(user_preferences, "enable_draw_arrows", toggle=True, text="", icon='EMPTY_SINGLE_ARROW')
         row.prop(user_preferences, "arrow_scale", text="Scale")
 
         row = layout.row()
         row.prop(user_preferences, "enable_draw_faces", toggle=True, text="", icon='FACESEL')
-        row.prop(user_preferences, "gradient_sensitivity_distance", text= 'Sensitivity')
+        row.prop(user_preferences, "gradient_sensitivity_distance", text='Sensitivity')
         if has_extras:
             layout.prop(user_preferences, "enable_draw_constraints", toggle=True, text="Constraints", icon='CONSTRAINT')
+
+
+class VIEW3D_PT_final_topology_inverse_subdivide(Panel):
+    bl_category = "Edit"
+    bl_idname = "VIEW3D_PT_final_topology_inverse_subdivide"
+    bl_space_type = "VIEW_3D"
+    bl_region_type = "UI"
+    bl_label = "Inverse Subdivide"
+    bl_parent_id = "VIEW3D_PT_final_topology_editmode"
+    bl_options = {"DEFAULT_CLOSED"}
+
+    def draw(self, context):
+        layout = self.layout
+        inverse_subdivide_UI_draw(self, context)
 
 
 # separate UI panel in the side bar
 # in category Final Topology
 class VIEW3D_PT_final_topology_objectmode(Panel):
-    bl_category = "Final topology"
+    bl_category = "Edit"
     bl_idname = "VIEW3D_PT_final_topology_objectmode"
     bl_space_type = "VIEW_3D"
     bl_region_type = "UI"
@@ -285,7 +303,7 @@ class VIEW3D_PT_final_topology_objectmode(Panel):
 
 
 class VIEW3D_PT_final_topology_editmode(Panel):
-    bl_category = "Final topology"
+    bl_category = "Edit"
     bl_idname = "VIEW3D_PT_final_topology_editmode"
     bl_space_type = "VIEW_3D"
     bl_region_type = "UI"
@@ -298,15 +316,6 @@ class VIEW3D_PT_final_topology_editmode(Panel):
 
     def draw(self, context):
         layout = self.layout
-        if has_extras:
-            layout.operator(FlattenSelectionOperator.bl_idname, text="Flatten Selection")
-            layout.operator(NormalLoopAlign.bl_idname, text="Loop Align to Normal Plane")
-            layout.operator(SlideOptimizeOperator.bl_idname, text="Loop Slide Optimize")
-
-
-        layout.operator(InverseSubdivideStep.bl_idname, text="Inverse Subdivide Step", icon='MOD_SUBSURF')
-
-        inverse_subdivide_UI_draw(self, context)
 
 
 def slide_menu_func(self, context):
@@ -334,16 +343,16 @@ def draw_inverse_subdivide_toggle(self, context):
 
 classes = [InverseSubdivideModal,
            InverseSubdivideStep,
+           FreezeShape,
            FinalUnsubdivide,
            InverseSubdivideAddonPreferences,
            PopupDialog,
            VIEW3D_PT_final_topology_editmode,
+           VIEW3D_PT_final_topology_inverse_subdivide,
            VIEW3D_PT_final_topology_objectmode,
            VIEW3D_PT_final_topology_overlays,
 
            ]
-
-
 
 addon_keymapitems = []
 
@@ -367,7 +376,7 @@ def register():
     # Add shortcuts
     wm = bpy.context.window_manager
     km = wm.keyconfigs.addon.keymaps.new(name="Window", space_type="VIEW_3D")
-    
+
     kmi = km.keymap_items.new(
         "mesh.inverse_subdivide_modal", type='FIVE', value='PRESS', ctrl=False, shift=False, alt=False
     )

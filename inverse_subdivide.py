@@ -351,7 +351,7 @@ def inverse_subdivide_step(self, context, target_objects, iterations=1, neighbou
 
     for a in range(0, iterations):
         draw.clear_draw_list()
-        
+
         if has_extras:
             extras.evaluate_constraints(obj,bm)
         # we need to evaluate result subdivided mesh every iteration,
@@ -439,6 +439,8 @@ class InverseSubdivideStep(Operator):
         description="Number of neighbours to take into account for each vertex. \n Higher number will result in more accurate results, but in complex areas can screw up."
     )
 
+    warning_posted = BoolProperty(default=False)
+
     def execute(self, context):
         user_preferences = bpy.context.preferences.addons['final_topology'].preferences
 
@@ -486,6 +488,8 @@ class InverseSubdivideModal(Operator):
     bl_description = "Start compensating for inverse subdivision." \
                      "\nUse CTRL during transorms to initiate." \
                      "\nDon't combine with face projection if you snap larger parts of mesh"
+    bl_options = {'REGISTER', 'UNDO'}
+
 
     warning_posted = BoolProperty(default=False)
 
@@ -587,6 +591,68 @@ class InverseSubdivideModal(Operator):
 
         return {'RUNNING_MODAL'}
 
+
+def create_freeze_mesh_object():
+    orig_ob = bpy.context.active_object
+    orig_mode = bpy.context.mode
+    bpy.ops.object.mode_set(mode='OBJECT')
+    bpy.ops.object.duplicate()
+    freeze_mesh_object = bpy.context.active_object
+    freeze_mesh_object.name = 'FROZEN_MESH_STATE'
+    freeze_mesh_object.name = 'FROZEN_MESH_STATE'  # double setting name removes the .001s
+
+    for m in freeze_mesh_object.modifiers:
+        if m.type != 'MIRROR':
+            m.show_viewport = False
+            m.show_render = False
+    # freeze_mesh_object.modifiers.clear()
+    # hide the object
+    # freeze_mesh_object.hide_viewport = True
+    freeze_mesh_object.hide_set(True)
+
+    freeze_mesh_object.hide_render = True
+
+    m = freeze_mesh_object.modifiers.new('Subdivision', 'SUBSURF')
+    m.levels = 5
+    utils.activate_object(orig_ob)
+    bpy.ops.object.mode_set(mode='EDIT')
+    prefs = bpy.context.preferences.addons['final_topology'].preferences
+    prefs.use_object_or_collection = "OBJECT"
+    bpy.context.scene.inverse_subdivide_target_object = freeze_mesh_object
+    return freeze_mesh_object
+
+
+def delete_frozen_mesh():
+    prefs = bpy.context.preferences.addons['final_topology'].preferences
+    # bpy.ops.object.mode_set(mode='OBJECT')
+
+    # bpy.ops.object.select_all(action='DESELECT')
+    object = bpy.data.objects.get('FROZEN_MESH_STATE')
+    if object is not None:
+        bpy.data.objects.remove(object)
+    # bpy.ops.object.mode_set(mode='EDIT')
+
+    # object.select_set(True)
+    # bpy.context.view_layer.objects.active = object
+    # bpy.ops.object.delete(use_global=False)
+    # bpy.data.meshes.remove(object.data)
+    # bpy.data.objects.remove(object)
+
+
+class FreezeShape(bpy.types.Operator):
+    bl_idname = "mesh.freeze_shape"
+    bl_label = "Freeze Subdiv Shape"
+    bl_description = "Freeze Subdiv Shape while you change the models topology." \
+                     "\nCreates a copy of self and switches on snapping to it."
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        object = bpy.data.objects.get('FROZEN_MESH_STATE')
+        if object is not None:
+            delete_frozen_mesh()
+        else:
+            create_freeze_mesh_object()
+        return {'FINISHED'}
 
 def custom_unsubdivide(bm, mesh, levels):
     # Step 1: Identify starting vertices (corners or verts with edge count != 4)

@@ -13,6 +13,7 @@ from bpy.props import IntProperty, FloatProperty
 from math import pi, atan2
 from random import random
 from . import draw
+import mesh_looptools as looptools
 
 
 def estimate_best_fit_plane(verts, method="best_fit"):
@@ -560,7 +561,8 @@ def get_attribute_elements(object, bm, constraint):
     if object.data.ft_custom_constraints[object.data.ft_custom_constraints_index] == constraint:
         alpha = 0.4
         color = (
-        max(constraint.color[0] * 2, 0.6), max(constraint.color[1] * 2, 0.6), max(constraint.color[2] * 2, 0.6), alpha)
+            max(constraint.color[0] * 2, 0.6), max(constraint.color[1] * 2, 0.6), max(constraint.color[2] * 2, 0.6),
+            alpha)
     for e in bm.edges:
         if e.verts[0] in return_elements and e.verts[1] in return_elements:
             world_vert_position = ob_matrix_world @ e.verts[0].co
@@ -584,74 +586,6 @@ def evaluate_constraints(object, bm):
                 flatten_verts(plane_verts, slide=False, method='fixed', center=Vector(c.center),
                               normal=Vector(c.normal))
 
-
-def activate_object(ob):
-    bpy.ops.object.select_all(action='DESELECT')
-    ob.select_set(True)
-    bpy.context.view_layer.objects.active = ob
-
-
-def create_freeze_mesh_object():
-    orig_ob = bpy.context.active_object
-    orig_mode = bpy.context.mode
-    bpy.ops.object.mode_set(mode='OBJECT')
-    bpy.ops.object.duplicate()
-    freeze_mesh_object = bpy.context.active_object
-    freeze_mesh_object.name = 'FROZEN_MESH_STATE'
-    freeze_mesh_object.name = 'FROZEN_MESH_STATE'  # double setting name removes the .001s
-
-    for m in freeze_mesh_object.modifiers:
-        if m.type != 'MIRROR':
-            m.show_viewport = False
-            m.show_render = False
-    # freeze_mesh_object.modifiers.clear()
-    # hide the object
-    # freeze_mesh_object.hide_viewport = True
-    freeze_mesh_object.hide_set(True)
-
-    freeze_mesh_object.hide_render = True
-
-    m = freeze_mesh_object.modifiers.new('Subdivision', 'SUBSURF')
-    m.levels = 5
-    activate_object(orig_ob)
-    bpy.ops.object.mode_set(mode='EDIT')
-    prefs = bpy.context.preferences.addons['final_topology'].preferences
-    prefs.use_object_or_collection = "OBJECT"
-    bpy.context.scene.inverse_subdivide_target_object = freeze_mesh_object
-    return freeze_mesh_object
-
-
-def delete_frozen_mesh():
-    prefs = bpy.context.preferences.addons['final_topology'].preferences
-    # bpy.ops.object.mode_set(mode='OBJECT')
-
-    # bpy.ops.object.select_all(action='DESELECT')
-    object = bpy.data.objects.get('FROZEN_MESH_STATE')
-    if object is not None:
-        bpy.data.objects.remove(object)
-    # bpy.ops.object.mode_set(mode='EDIT')
-
-    # object.select_set(True)
-    # bpy.context.view_layer.objects.active = object
-    # bpy.ops.object.delete(use_global=False)
-    # bpy.data.meshes.remove(object.data)
-    # bpy.data.objects.remove(object)
-
-
-class FreezeShape(bpy.types.Operator):
-    bl_idname = "mesh.freeze_shape"
-    bl_label = "Freeze Subdiv Shape"
-    bl_description = "Freeze Subdiv Shape while you change the models topology." \
-                     "\nCreates a copy of self and switches on snapping to it."
-    bl_options = {'REGISTER', 'UNDO'}
-
-    def execute(self, context):
-        object = bpy.data.objects.get('FROZEN_MESH_STATE')
-        if object is not None:
-            delete_frozen_mesh()
-        else:
-            create_freeze_mesh_object()
-        return {'FINISHED'}
 
 
 class FunTopologyDecimateOperator(bpy.types.Operator):
@@ -727,7 +661,7 @@ def update_constraint_index(self, context):
     constraint = context.object.data.ft_custom_constraints[context.object.data.ft_custom_constraints_index]
     bm = bmesh.from_edit_mesh(context.object.data)
     verts = get_attribute_elements(context.object, bm, constraint)
-    if len(verts)>0:
+    if len(verts) > 0:
         bpy.ops.mesh.select_all(action='DESELECT')
 
         for v in verts:
@@ -769,18 +703,37 @@ class VIEW3D_PT_final_topology_constraints(bpy.types.Panel):
         col = row.column(align=True)
         col.operator("object.final_topology_add_constraint", icon='ADD', text="")
         col.operator("object.final_topology_delete_constraint", icon='REMOVE', text="")
-        ac = mesh.ft_custom_constraints[mesh.ft_custom_constraints_index]
-        layout.prop(ac, "name")
-        layout.prop(ac, "constraint_type")
-        if ac.constraint_type == "PLANEFIXED":
-            layout.prop(ac, "center")
-            layout.prop(ac, "normal")
+        if len(mesh.ft_custom_constraints) > 0:
+            ac = mesh.ft_custom_constraints[mesh.ft_custom_constraints_index]
+            layout.prop(ac, "name")
+            layout.prop(ac, "constraint_type")
+            if ac.constraint_type == "PLANEFIXED":
+                layout.prop(ac, "center")
+                layout.prop(ac, "normal")
 
 
-import bpy
+class VIEW3D_PT_final_topology_extra_operators(bpy.types.Panel):
+    bl_category = "Edit"
+    bl_idname = "VIEW3D_PT_final_topology_extra_operators"
+    bl_space_type = "VIEW_3D"
+    bl_region_type = "UI"
+    bl_label = "Extra loop tools"
+    bl_parent_id = "VIEW3D_PT_final_topology_editmode"
+    bl_options = {"DEFAULT_CLOSED"}
+
+    @classmethod
+    def poll(self, context):
+        return has_extras
+
+    def draw(self, context):
+        layout = self.layout
+
+        layout.operator(FlattenSelectionOperator.bl_idname, text="Flatten Selection")
+        layout.operator(NormalLoopAlign.bl_idname, text="Loop Align to Normal Plane")
+        layout.operator(SlideOptimizeOperator.bl_idname, text="Loop Slide Optimize")
 
 
-def fill_attribute_with_selection(attribute_name, mesh, type="FLOAT", domain="POINT", new = False):
+def fill_attribute_with_selection(attribute_name, mesh, type="FLOAT", domain="POINT", new=False):
     bm = bmesh.from_edit_mesh(mesh)
     values = [v.select for v in bm.verts]
     bpy.ops.object.mode_set(mode="OBJECT")
@@ -823,6 +776,7 @@ class AddConstraintOperator(bpy.types.Operator):
         if len(selected_verts) == 0:
             self.report({'ERROR'}, "No vertices selected")
             return {'CANCELLED'}
+
         # Create a new constraint
         new_constraint = mesh.ft_custom_constraints.add()
         new_constraint.name = self.name
@@ -840,9 +794,13 @@ class AddConstraintOperator(bpy.types.Operator):
             center, normal = estimate_best_fit_plane(selected_verts, "best_fit")
             new_constraint.center = center
             new_constraint.normal = normal
-
+        if self.constraint_type == "CURVE":
+            # get fixed plane from selection for constraints
+            center, normal = estimate_best_fit_plane(selected_verts, "best_fit")
+            new_constraint.center = center
+            new_constraint.normal = normal
         attribute_name = fill_attribute_with_selection(attribute_name, mesh, type="FLOAT",
-                                                       domain="POINT", new = True)
+                                                       domain="POINT", new=True)
         # we name the attribute after its creation, since we couldn't be sure about it's .00x ending
         new_constraint.attribute_name = attribute_name
 
@@ -911,12 +869,13 @@ classes = [
     FlattenSelectionOperator,
     NormalLoopAlign,
     FunTopologyDecimateOperator,
-    FreezeShape,
+
     CustomConstraint,
     AddConstraintOperator,
     DeleteConstraintOperator,
     CUSTOM_UL_list,
     VIEW3D_PT_final_topology_constraints,
+    VIEW3D_PT_final_topology_extra_operators
 ]
 
 
