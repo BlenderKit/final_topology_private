@@ -6,7 +6,8 @@ bl_info = {
     "location": "View3D > Sidebar > Edit > Final Topology",
     "description": "Professional subdivision modelling tools, simply magic.",
     "warning": "",
-    "doc_url": "",
+    "doc_url": "https://github.com/BlenderKit/final_topology",
+    "tracker_url": "https://github.com/BlenderKit/final_topology/issues",
     "category": "3D View",
 }
 
