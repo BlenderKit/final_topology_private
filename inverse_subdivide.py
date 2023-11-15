@@ -353,7 +353,7 @@ def inverse_subdivide_step(self, context, target_objects, iterations=1, neighbou
         draw.clear_draw_list()
 
         if has_extras:
-            extras.evaluate_constraints(obj,bm)
+            bm = extras.evaluate_constraints(obj,bm)
         # we need to evaluate result subdivided mesh every iteration,
         # so need a fresh bm_eval, except for first iteration
         if a > 0:
@@ -630,13 +630,7 @@ def delete_frozen_mesh():
     object = bpy.data.objects.get('FROZEN_MESH_STATE')
     if object is not None:
         bpy.data.objects.remove(object)
-    # bpy.ops.object.mode_set(mode='EDIT')
-
-    # object.select_set(True)
-    # bpy.context.view_layer.objects.active = object
-    # bpy.ops.object.delete(use_global=False)
-    # bpy.data.meshes.remove(object.data)
-    # bpy.data.objects.remove(object)
+    prefs.use_object_or_collection = "SCENE"
 
 
 class FreezeShape(bpy.types.Operator):

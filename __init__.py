@@ -3,8 +3,8 @@ bl_info = {
     "author": "Vilem Duha, BlenderKit",
     "version": (1, 0),
     "blender": (3, 6, 0),
-    "location": "View3D > Snapping > Inverse-subdivide ",
-    "description": "Compensates subdivide during modelling, simply magic.",
+    "location": "View3D > Sidebar > Edit > Final Topology",
+    "description": "Professional subdivision modelling tools, simply magic.",
     "warning": "",
     "doc_url": "",
     "category": "3D View",
@@ -13,7 +13,6 @@ bl_info = {
 from importlib import reload
 
 has_extras = True
-
 if "bpy" in locals():
     try:
         extras = reload(extras)
@@ -216,29 +215,29 @@ def inverse_subdivide_UI_draw(self, context):
     if user_preferences.always_on:
         layout.prop(user_preferences, "use_timer", toggle=False, icon='TIME')
 
-        layout.separator()
-        layout.label(text='Snap to')
-        if bpy.data.objects.get("FROZEN_MESH_STATE") is not None:
-            layout.operator(FreezeShape.bl_idname, text="Unfreeze shape", depress=True, icon='FREEZE')
+    layout.separator()
+    layout.label(text='Snap to')
+    if bpy.data.objects.get("FROZEN_MESH_STATE") is not None:
+        layout.operator(FreezeShape.bl_idname, text="Unfreeze shape", depress=True, icon='FREEZE')
 
+    else:
+        layout.operator(FreezeShape.bl_idname, text="Freeze Shape", depress=False, icon='FREEZE')
+        row = layout.row()
+        row.prop(user_preferences, "use_object_or_collection", text="")
+        if user_preferences.use_object_or_collection == 'OBJECT':
+            # Layout for target object selection using prop_search
+            row.prop(bpy.context.scene, "inverse_subdivide_target_object", text="")
+        elif user_preferences.use_object_or_collection == 'COLLECTION':
+            # Layout for target collection selection using prop_search
+            row.prop(bpy.context.scene, "inverse_subdivide_target_collection", text="")
         else:
-            layout.operator(FreezeShape.bl_idname, text="Freeze Shape", depress=False, icon='FREEZE')
-            row = layout.row()
-            row.prop(user_preferences, "use_object_or_collection", text="")
-            if user_preferences.use_object_or_collection == 'OBJECT':
-                # Layout for target object selection using prop_search
-                row.prop(bpy.context.scene, "inverse_subdivide_target_object", text="")
-            elif user_preferences.use_object_or_collection == 'COLLECTION':
-                # Layout for target collection selection using prop_search
-                row.prop(bpy.context.scene, "inverse_subdivide_target_collection", text="")
-            else:
-                # Scene option, no need to display anything
-                pass
+            # Scene option, no need to display anything
+            pass
 
-        if has_extras:
-            layout.separator()
-            layout.prop(user_preferences, "iterations")
-            layout.prop(user_preferences, "neighbours")
+    if has_extras:
+        layout.separator()
+        layout.prop(user_preferences, "iterations")
+        layout.prop(user_preferences, "neighbours")
     layout.prop(user_preferences, "max_distance")
     if has_extras:
         layout.prop(user_preferences, "weight_algorithm")
@@ -402,10 +401,6 @@ def unregister():
 
     wm = bpy.context.window_manager
     km = wm.keyconfigs.addon.keymaps["Window"]
-
-    for kmi in addon_keymapitems:
-        km.keymap_items.remove(kmi)
-        addon_keymapitems.clear()
 
     try:
         for kmi in addon_keymapitems:

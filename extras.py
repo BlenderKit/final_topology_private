@@ -571,6 +571,66 @@ def get_attribute_elements(object, bm, constraint):
                           color)
     return return_elements
 
+def get_selected_vertices(object, bm):
+    return [v for v in bm.verts if v.select]
+
+def set_selected_vertices(object, bm, verts):
+    for v in bm.verts:
+        v.select = False
+    for v in verts:
+        v.select = True
+
+from mesh_looptools import *
+
+def do_circle(object,bm, verts, fit='best', flatten=False, custom_radius=True, influence=10, lock_x=False, lock_y=False, lock_z=False, regular=False, radius=.35, angle=0):
+
+    # find loops
+    derived, bm_mod, single_vertices, single_loops, loops = \
+        circle_get_input(object, bm)
+    mapping = get_mapping(derived, bm, bm_mod, single_vertices,
+                          False, loops)
+    single_loops, loops = circle_check_loops(single_loops, loops,
+                                             mapping, bm_mod)
+
+    move = []
+    for i, loop in enumerate(loops):
+        # best fitting flat plane
+        com, normal = calculate_plane(bm_mod, loop)
+        # if circular, shift loop so we get a good starting vertex
+        if loop[1]:
+            loop = circle_shift_loop(bm_mod, loop, com)
+        # flatten vertices on plane
+        locs_2d, p, q = circle_3d_to_2d(bm_mod, loop, com, normal)
+        # calculate circle
+        if fit == 'best':
+            x0, y0, r = circle_calculate_best_fit(locs_2d)
+        else:  # self.fit == 'inside'
+            x0, y0, r = circle_calculate_min_fit(locs_2d)
+        # radius override
+        if custom_radius:
+            r = radius / p.length
+        # calculate positions on circle
+        if regular:
+            new_locs_2d = circle_project_regular(locs_2d[:], x0, y0, r, angle)
+        else:
+            new_locs_2d = circle_project_non_regular(locs_2d[:], x0, y0, r, angle)
+        # take influence into account
+        locs_2d = circle_influence_locs(locs_2d, new_locs_2d,
+                                        influence)
+        # calculate 3d positions of the created 2d input
+        move.append(circle_calculate_verts(flatten, bm_mod,
+                                           locs_2d, com, p, q, normal))
+        # flatten single input vertices on plane defined by loop
+        if flatten and single_loops:
+            move.append(circle_flatten_singles(bm_mod, com, p, q,
+                                               normal, single_loops[i]))
+
+    # move vertices to new locations
+    if lock_x or lock_y or lock_z:
+        lock = [lock_x, lock_y, lock_z]
+    else:
+        lock = False
+    move_verts(object, bm, mapping, move, lock, -1)
 
 def evaluate_constraints(object, bm):
     cs = object.data.ft_custom_constraints
@@ -586,6 +646,18 @@ def evaluate_constraints(object, bm):
                 flatten_verts(plane_verts, slide=False, method='fixed', center=Vector(c.center),
                               normal=Vector(c.normal))
 
+        elif c.constraint_type == 'CIRCLE':
+            sel = get_selected_vertices(object, bm)
+
+            circle_verts = get_attribute_elements(object, bm, c)
+            set_selected_vertices(object, bm, circle_verts)
+            # bmesh.update_edit_mesh(object.data)
+            do_circle(object, bm, circle_verts)
+            # bpy.ops.mesh.looptools_circle(custom_radius=True, fit='best', flatten=False, influence=10, lock_x=False,
+            #                               lock_y=False, lock_z=False, radius=.35, angle=0, regular=False)
+            # bm = bmesh.from_edit_mesh(object.data)
+            set_selected_vertices(object, bm, sel)
+    return bm
 
 
 class FunTopologyDecimateOperator(bpy.types.Operator):
@@ -678,6 +750,8 @@ class CustomConstraint(bpy.types.PropertyGroup):
         ("PLANE", "Plane", "Planar constraint"),
         ("PLANEFIXED", "Plane Fixed", "Planar constraint fixed"),
         ("CURVE", "Curve (TODO)", "Curve constraint"),
+        # ("CIRCLE", "Circle (Experimental)", "Circle constraint"),
+
     ])
     center: bpy.props.FloatVectorProperty(name="Center", size=3)
     normal: bpy.props.FloatVectorProperty(name="Normal", size=3)
@@ -721,9 +795,9 @@ class VIEW3D_PT_final_topology_extra_operators(bpy.types.Panel):
     bl_parent_id = "VIEW3D_PT_final_topology_editmode"
     bl_options = {"DEFAULT_CLOSED"}
 
-    @classmethod
-    def poll(self, context):
-        return has_extras
+    # @classmethod
+    # def poll(self, context):
+    #     return has_extras
 
     def draw(self, context):
         layout = self.layout
@@ -759,6 +833,7 @@ class AddConstraintOperator(bpy.types.Operator):
         ("PLANE", "Plane", "Planar constraint"),
         ("PLANEFIXED", "Plane Fixed", "Planar constraint fixed"),
         ("CURVE", "Curve (TODO)", "Curve constraint"),
+        # ("CIRCLE", "Circle (Experimental)", "Circle constraint"),
     ])
     center: bpy.props.FloatVectorProperty(name="Center", size=3, default=(0.0, 0.0, 0.0))
     normal: bpy.props.FloatVectorProperty(name="Normal", size=3, default=(0.0, 0.0, 0.0))

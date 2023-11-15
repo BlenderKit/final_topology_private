@@ -1,6 +1,6 @@
 # Final Topology addon for Blender 3D
 
-Blende 3D addon that introduces subdivision snapping, retopo, modeling tools from the 21st century.
+Blender 3D addon that introduces subdivision snapping, retopo and modeling tools from the 21st century.
 
 This Blender 3D addon features many tools that were missing and also organizes some simple, but essential tools for polygonal modeling.
 Enhanced version adds extra tools for professional CAD and automotive industry modellers.
