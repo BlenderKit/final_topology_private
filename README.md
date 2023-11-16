@@ -20,3 +20,11 @@ Enhanced version adds extra tools for professional CAD and automotive industry m
 - **Loop slide optimize** - balances angles that there are between edges of a loop
 - **Flatten selection** - simple flatten to median plane operator (Similar to looptools)
   
+**Basic instructions:**
+After installing the addon, find it in the Edit tab of the Sidebar in 3D view.
+
+Read tooltips directly in the add-onm every button should have enough info to use the tool.
+
+You need to have a mesh that has Subdivision surface modifier on. Any other modifiers will turn off during interaction.
+
+![interface](https://github.com/BlenderKit/final_topology_private/assets/6907354/cfa6aaa4-e547-4e55-bec2-a895b9b5d2f4)
