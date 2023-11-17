@@ -401,9 +401,10 @@ class SlideOptimizeOperator(bpy.types.Operator):
         if event.type == 'MOUSEMOVE':
             delta = event.mouse_x - self.first_mouse_x
 
-            self.slide_vertices(iterations=int(delta * .2))
-            # self.slide_vertices(iterations=200)  # int(delta *.2))
-            return {'RUNNING_MODAL'}
+            # self.slide_vertices(iterations=int(delta * .2))
+            self.slide_vertices(iterations=200)  # int(delta *.2))
+            # return {'RUNNING_MODAL'}
+            return {'FINISHED'}
         elif event.type == 'LEFTMOUSE' and event.value == 'RELEASE':
             return {'FINISHED'}
 
@@ -764,6 +765,7 @@ class VIEW3D_PT_final_topology_constraints(bpy.types.Panel):
     bl_idname = "VIEW3D_PT_final_topology_constraints"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
+    bl_description = "Constraints are used to define areas of the mesh that should be preserved during optimization"
     bl_category = 'Final topoljogy'
     bl_parent_id = "VIEW3D_PT_final_topology_editmode"
 
@@ -825,6 +827,11 @@ def fill_attribute_with_selection(attribute_name, mesh, type="FLOAT", domain="PO
 class AddConstraintOperator(bpy.types.Operator):
     bl_idname = "object.final_topology_add_constraint"
     bl_label = "Add Constraint"
+    bl_description = ("\n\nSelect vertices and run this operator to add a constraint."
+                      "\nCurrently only planar constraints are supported."
+                      "\nConstraints get evaluated only during Inverse subdivision steps/modal operator."
+                      "\n These work together with inverse subdivision snapping, \n"
+                      "so you can optimize more parameters of the mesh.")
     bl_options = {'REGISTER', 'UNDO'}
 
     name: bpy.props.StringProperty(name="Name", default='Constraint')

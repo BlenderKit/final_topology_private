@@ -91,31 +91,34 @@ class InverseSubdivideAddonPreferences(AddonPreferences):
     )
 
     use_timer: BoolProperty(
-        name="Sim mode",
+        name="Simulation mode",
         default=False,
-        description="Use timer with the always on option",
+        description="The Inverse subdivision will run several times per second.\n\n"
+                    "This is useful for interactive modelling, "
+                    "\nbut can be slow or instableon complex meshes."
     )
 
     iterations: IntProperty(
         name="Iterations",
         default=1,
         min=1, max=100,
-        description="Number of iterations.\n Higher numbers are more precise and slower"
+        description="Higher numbers are more precise and slower"
     )
 
     neighbours: IntProperty(
         name="Neighbours levels",
         default=1,
         min=0, max=10,
-        description="Number of surrounding faces to which the snapping happens too.\n"
+        description="Number of surrounding faces influenced.\n\n"
                     "This is useful since subdivided surface \n"
-                    "always gets influence from the surrounding faces"
+                    "always gets influence from the surrounding faces."
     )
     max_distance: FloatProperty(
         name="Max Distance",
-        default=.02,
+        default=.1,
         min=0, max=1,
-        description="Maximum distance to move vertices. \n If distance is higher, vertices stay in place",
+        description="Maximum distance to move vertices. "
+                    "\n\n If distance is higher, vertices stay in place",
         precision=10,
         unit='LENGTH'
     )
@@ -124,7 +127,7 @@ class InverseSubdivideAddonPreferences(AddonPreferences):
         name="Gradient Sensitivity",
         default=.02,
         min=0.0001, max=1,
-        description="Color gradient sensitivity, anything over this distance will be strictly red",
+        description="Color gradient sensitivity, \n anything over this distance will be strictly red",
         precision=10,
         unit='LENGTH'
     )
@@ -133,24 +136,30 @@ class InverseSubdivideAddonPreferences(AddonPreferences):
         name="Arrow scale",
         default=10,
         min=0.1, max=100,
-        description="Arrow scale - multiplier of the distance by which the vertex was moved in the last iteration",
+        description="Arrow scale - multiplier of the distance by which the vertex was moved in the last iteration.",
         precision=1,
     )
 
     enable_draw_faces: BoolProperty(
         name="Draw Faces",
         default=False,
-        description="Toggle to enable or disable drawing of faces"
+        description="Draw faces around influence points.\n\n"
+                    "Draws faces colored by the distance from target surface.\n"
+                    "Color gradient influenced by the gradient sensitivity distance."
     )
     enable_draw_arrows: BoolProperty(
         name="Draw Arrows",
         default=True,
-        description="Toggle to enable or disable drawing of arrows"
+        description="Drawing of arrows at projected points.\n\n"
+                    "Arrows are scaled by the distance from target surface.\n"
+                    "Color gradient influenced by the gradient sensitivity distance."
     )
     enable_draw_constraints: BoolProperty(
         name="Draw Constraints",
         default=True,
-        description="Toggle to enable or disable drawing of constraints"
+        description="Drawing of constraints.\n\n"
+                    "Selected constraint gets highlighted and selected.\n"
+
     )
     overlays_alpha: FloatProperty(
         name="Overlays Alpha",
@@ -162,12 +171,12 @@ class InverseSubdivideAddonPreferences(AddonPreferences):
     use_object_or_collection: EnumProperty(
         name="Use Object or Collection",
         items=[
-            ('SCENE', "Scene", "Snap to all objects in scene"),
-            ('OBJECT', "Object", "Use the object as the target"),
-            ('COLLECTION', "Collection", "Use the collection as the target"),
+            ('SCENE', "Scene", "\nAll evaluated objects in scene"),
+            ('OBJECT', "Object", "\nSingle object"),
+            ('COLLECTION', "Collection", "\nCollection"),
         ],
         default='SCENE',
-        description="Choose whether to use an object or a collection as the target."
+        description="Snap to"
     )
 
     weight_algorithm: EnumProperty(
@@ -179,16 +188,9 @@ class InverseSubdivideAddonPreferences(AddonPreferences):
             ('FIRSTDIST', "Distance", "Edge midpoints are weighted by distance to main vert"),
         ],
         default='ALL1',
-        description="Choose whether to use distance or edge length for weighting."
-    )
-    normal_direction: EnumProperty(
-        name="Normal Direction",
-        items=[
-            ('ORIGINAL', "Normal", "Use vertex normal"),
-            ('SUBDIVIDED', "Subdivided", "Use subdivided face normal"),
-        ],
-        default='SUBDIVIDED',
-        description="choose which normal is used for the offset."
+        description="Choose weighting algorithm.\n\n"
+                    "This influences how the offset is calculated and\n"
+                    "how much weight do the midpoints get."
     )
 
 
@@ -200,7 +202,7 @@ def inverse_subdivide_UI_draw(self, context):
     user_preferences = bpy.context.preferences.addons[__name__].preferences
     layout = self.layout
 
-    layout.operator(InverseSubdivideStep.bl_idname, text="Inverse Subdivide Step", icon='MOD_SUBSURF')
+    layout.operator(InverseSubdivideStep.bl_idname, text="Inverse Subdivide Step", icon='TRACKING_FORWARDS_SINGLE')
 
     if user_preferences.enable_operator:
         layout.operator(InverseSubdivideModal.bl_idname, text="Inverse Subdsurf Modal", icon='MOD_SUBSURF', emboss=True,
@@ -261,7 +263,7 @@ class VIEW3D_PT_final_topology_overlays(Panel):
         layout.separator()
         row = layout.row()
         row.prop(user_preferences, "enable_draw_arrows", toggle=True, text="", icon='EMPTY_SINGLE_ARROW')
-        row.prop(user_preferences, "arrow_scale", text="Scale")
+        row.prop(user_preferences, "arrow_scale", text="Arrow Scale")
 
         row = layout.row()
         row.prop(user_preferences, "enable_draw_faces", toggle=True, text="", icon='FACESEL')

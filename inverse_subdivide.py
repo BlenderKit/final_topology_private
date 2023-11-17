@@ -419,8 +419,8 @@ class InverseSubdivideStep(Operator):
     bl_idname = "mesh.inverse_subdivide_step"
     bl_label = "Inverse Subdivide Snapping Step"
     bl_description = "Run the subdivision compensation one step. " \
-                     "\n This should be useful when you need stable behaviour and \n" \
-                     "want only use the tool locally"
+                     "\n\nIf you need stable behaviour and \n" \
+                     "want only use the tool locally, run this operator whenever needed"
     bl_options = {'REGISTER', 'UNDO'}
 
     iterations: bpy.props.IntProperty(
@@ -486,8 +486,8 @@ class InverseSubdivideModal(Operator):
     bl_idname = "mesh.inverse_subdivide_modal"
     bl_label = "Inverse Subdivide Snapping Modal"
     bl_description = "Start compensating for inverse subdivision." \
-                     "\nUse CTRL during transorms to initiate." \
-                     "\nDon't combine with face projection if you snap larger parts of mesh"
+                     "\n\nUse CTRL during transorms to initiate." \
+                     "\nDo not combine with face projection if you snap larger parts of mesh"
     bl_options = {'REGISTER', 'UNDO'}
 
 
@@ -635,9 +635,10 @@ def delete_frozen_mesh():
 
 class FreezeShape(bpy.types.Operator):
     bl_idname = "mesh.freeze_shape"
-    bl_label = "Freeze Subdiv Shape"
-    bl_description = "Freeze Subdiv Shape while you change the models topology." \
-                     "\nCreates a copy of self and switches on snapping to it."
+    bl_label = "Freeze Subdivision Shape"
+    bl_description = "Switch on the Modal operator or perform Inverse Subdivide steps." \
+                      "\n\nCreates a copy of self and switches on snapping to it." \
+                      "\nUse to reorganize your topology, but try to preserve shape."
     bl_options = {'REGISTER', 'UNDO'}
 
     def execute(self, context):
@@ -720,7 +721,7 @@ class FinalUnsubdivide(bpy.types.Operator):
     bl_idname = "object.final_unsubdivide"
     bl_label = "Final Unsubdivide"
     bl_description = "Unsubdivide mesh. " \
-                     "\nWorks on meshes that had subdivision surface applied." \
+                     "\n\nWorks on meshes that had subdivision surface applied." \
                      "\n won't work on triangulated meshes." \
                      "\nFor high precision, increase number of iterations (up to 500) and wait! ;)"
     bl_options = {'REGISTER', 'UNDO'}
