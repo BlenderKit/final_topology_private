@@ -115,7 +115,7 @@ class InverseSubdivideAddonPreferences(AddonPreferences):
     )
     max_distance: FloatProperty(
         name="Max Distance",
-        default=.1,
+        default=1.0,
         min=0, max=5000,
         description="Maximum distance to move vertices. "
                     "\n\n If distance is higher, vertices stay in place",
@@ -187,7 +187,7 @@ class InverseSubdivideAddonPreferences(AddonPreferences):
             ('FIRSTONLY', "Only vertices, no edges", "Only vertices are used, no edge midpoints"),
             ('FIRSTDIST', "Distance", "Edge midpoints are weighted by distance to main vert"),
         ],
-        default='ALL1',
+        default='FIRST',
         description="Choose weighting algorithm.\n\n"
                     "This influences how the offset is calculated and\n"
                     "how much weight do the midpoints get."

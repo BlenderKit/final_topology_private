@@ -5,7 +5,7 @@ Blender 3D addon that introduces subdivision snapping, retopo and modeling tools
 This Blender 3D addon features many tools that were missing and also organizes some simple, but essential tools for polygonal modeling.
 Enhanced version adds extra tools for professional CAD and automotive industry modellers.
 
-**Features**:
+## Features:
  - **Inverse subdivision snapping**: snaps mesh vertices in edit mode so that if the subdivision modifier is used, the resulting surface is as close as possible to the surface.
    - Live, or 'Simulation' mode of this tool, which works realtime during modeling
    - Neighbours levels, Number of iteration settings
@@ -14,17 +14,24 @@ Enhanced version adds extra tools for professional CAD and automotive industry m
     -has settings for number of subdivisions, number of iterations of the algorithm. Higher interation numbers yield precise results.
 - **Shape Freeze** - Enables to change topology of Subdivision surface model while keeping the resulting shape as same as possible. (TODO)
 
-**Advanced version features:**
+##Advanced version features:
 - **Constraints** - Edit mode constraints that work together with the subdivision surface snapping. By now snapping to plane. Main difference compared to various shrinwrap modifier tricks is that all constraints get evaluated in a loop together with the subdivision surface snapping, so all conditions get optimized.
 - **Loop align to normal plane** - takes a loop and aligns it to a plane that is aligned with it's normals directions. 
 - **Loop slide optimize** - balances angles that there are between edges of a loop
 - **Flatten selection** - simple flatten to median plane operator (Similar to looptools)
   
-**Basic instructions:**
+
+## Download
+Final Topology add-on is available in [Full Plan subscription](https://www.blenderkit.com/plans/pricing/) to BlenderKit.
+
+## Support
+
+If you face any bug, please create a report in this repository's issue tracker: https://github.com/BlenderKit/final_topology/issues.
+If your bug is related to specific model or project and .blend file is required to debug the problem, please create issue in here and also send the .blend file to admin@blenderkit.com with subject mentioning the issue number and/or title.
+
+##Basic instructions:
 After installing the addon, find it in the Edit tab of the Sidebar in 3D view.
 
 Read tooltips directly in the add-onm every button should have enough info to use the tool.
 
 You need to have a mesh that has Subdivision surface modifier on. Any other modifiers will turn off during interaction.
-
-![interface](https://github.com/BlenderKit/final_topology_private/assets/6907354/cfa6aaa4-e547-4e55-bec2-a895b9b5d2f4)
