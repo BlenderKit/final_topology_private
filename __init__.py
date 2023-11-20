@@ -116,7 +116,7 @@ class InverseSubdivideAddonPreferences(AddonPreferences):
     max_distance: FloatProperty(
         name="Max Distance",
         default=.1,
-        min=0, max=1,
+        min=0, max=5000,
         description="Maximum distance to move vertices. "
                     "\n\n If distance is higher, vertices stay in place",
         precision=10,

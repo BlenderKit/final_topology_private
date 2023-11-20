@@ -15,6 +15,15 @@ from random import random
 from . import draw
 import mesh_looptools as looptools
 
+def kd_tree_from_bmesh(bm):
+    from mathutils import Vector
+    from mathutils.kdtree import KDTree
+
+    kd = KDTree(len(bm.verts))
+    for i, v in enumerate(bm.verts):
+        kd.insert(v.co, i)
+    kd.balance()
+    return kd
 
 def estimate_best_fit_plane(verts, method="best_fit"):
     """
