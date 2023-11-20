@@ -29,9 +29,11 @@ Final Topology add-on is available in [Full Plan subscription](https://www.blend
 If you face any bug, please create a report in this repository's issue tracker: https://github.com/BlenderKit/final_topology/issues.
 If your bug is related to specific model or project and .blend file is required to debug the problem, please create issue in here and also send the .blend file to admin@blenderkit.com with subject mentioning the issue number and/or title.
 
-##Basic instructions:
+## Basic instructions:
 After installing the addon, find it in the Edit tab of the Sidebar in 3D view.
 
-Read tooltips directly in the add-onm every button should have enough info to use the tool.
-
 You need to have a mesh that has Subdivision surface modifier on. Any other modifiers will turn off during interaction.
+
+Read tooltips directly in the add-on every button should have enough info to use the tool.
+
+![interface.jpg](..%2F..%2F..%2Fvids%2Fantisubsurf%2Finterface.jpg)
