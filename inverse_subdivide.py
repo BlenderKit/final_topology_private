@@ -1,24 +1,27 @@
-import bpy
 from math import radians
-from bpy.types import Operator
-from bpy.props import  BoolProperty, IntProperty
-from mathutils import Vector
+
 # from .draw import *
 # from .utils import *
 import bmesh
+import bpy
+from bpy.props import BoolProperty, IntProperty
+from bpy.types import Operator
+from mathutils import Vector
 
-from . import draw,utils
+from . import draw, utils
 
-has_extras=True
+has_extras = True
 try:
     from . import extras
 except:
-    has_extras=False
+    has_extras = False
 
 running_operator = None
 
-def get_closest_ray_hit(objects=[], source_position=Vector(), cast_direction=Vector(),
-                        depsgraph=None):
+
+def get_closest_ray_hit(
+    objects=[], source_position=Vector(), cast_direction=Vector(), depsgraph=None
+):
     """
     Cast a ray and return the closest hit object and hit point in world space.
     Returns None if no hit.
@@ -35,14 +38,18 @@ def get_closest_ray_hit(objects=[], source_position=Vector(), cast_direction=Vec
 
         for direction in [local_direction, -local_direction]:
             # Cast the ray in object space
-            hit, hit_position, hit_normal, hit_index = ob.ray_cast(local_origin, direction, depsgraph=depsgraph)
+            hit, hit_position, hit_normal, hit_index = ob.ray_cast(
+                local_origin, direction, depsgraph=depsgraph
+            )
 
             if hit:
                 # Transform the hit position back to world space
                 world_hit_position = ob.matrix_world @ hit_position
 
                 # Store hit position and distance
-                hit_data.append((world_hit_position, (world_hit_position - source_position).length))
+                hit_data.append(
+                    (world_hit_position, (world_hit_position - source_position).length)
+                )
 
     # Return None if no hit
     if len(hit_data) == 0:
@@ -116,14 +123,17 @@ def get_neighbors_within_levels(input_verts, levels):
     neighbors_within_levels = input_verts[:]
 
     def find_neighbors(vertex, level):
-        '''
+        """
         Recursive function to find neighbor vertices.
-        '''
+        """
         if level == 0:
             return
         for face in vertex.link_faces:
             for neighbor_vertex in face.verts:
-                if neighbor_vertex != vertex and neighbor_vertex not in neighbors_within_levels:
+                if (
+                    neighbor_vertex != vertex
+                    and neighbor_vertex not in neighbors_within_levels
+                ):
                     neighbors_within_levels.append(neighbor_vertex)
                     find_neighbors(neighbor_vertex, level - 1)
 
@@ -144,17 +154,17 @@ def set_modifiers_start(obj):
     modifiers_state_start = []
     for modifier in obj.modifiers:
         mod_settings = {}
-        mod_settings['show_viewport'] = modifier.show_viewport
-        mod_settings['show_in_editmode'] = modifier.show_in_editmode
-        mod_settings['virtual'] = False
-        if modifier.type not in ['ARMATURE', 'MIRROR', 'SUBSURF']:
+        mod_settings["show_viewport"] = modifier.show_viewport
+        mod_settings["show_in_editmode"] = modifier.show_in_editmode
+        mod_settings["virtual"] = False
+        if modifier.type not in ["ARMATURE", "MIRROR", "SUBSURF"]:
             modifier.show_viewport = False
             modifier.show_in_editmode = False
 
-        if modifier.type == 'SUBSURF':
+        if modifier.type == "SUBSURF":
             modifier.show_viewport = True
             modifier.show_in_editmode = True
-            mod_settings['levels'] = modifier.levels
+            mod_settings["levels"] = modifier.levels
             # Only support levels 1 and 2
             modifier.levels = min(2, modifier.levels)
             modifier.levels = max(1, modifier.levels)
@@ -162,16 +172,16 @@ def set_modifiers_start(obj):
         modifiers_state_start.append(mod_settings)
 
     if len(obj.modifiers) == 0:
-        bpy.ops.object.modifier_add(type='SUBSURF')
+        bpy.ops.object.modifier_add(type="SUBSURF")
         modifier = obj.modifiers[0]
         modifier.show_viewport = True
         modifier.show_in_editmode = True
         modifier.levels = 2
         mod_settings = {}
-        mod_settings['show_viewport'] = modifier.show_viewport
-        mod_settings['show_in_editmode'] = modifier.show_in_editmode
-        mod_settings['levels'] = modifier.levels
-        mod_settings['virtual'] = True
+        mod_settings["show_viewport"] = modifier.show_viewport
+        mod_settings["show_in_editmode"] = modifier.show_in_editmode
+        mod_settings["levels"] = modifier.levels
+        mod_settings["virtual"] = True
 
         modifiers_state_start.append(mod_settings)
     return modifiers_state_start
@@ -180,12 +190,12 @@ def set_modifiers_start(obj):
 def set_modifiers_end(obj, modifiers_state_start):
     for i, modifier in enumerate(obj.modifiers):
         mod_settings = modifiers_state_start[i]
-        if modifier.type == 'SUBSURF':
-            modifier.levels = mod_settings['levels']
-        modifier.show_viewport = mod_settings['show_viewport']
-        modifier.show_in_editmode = mod_settings['show_in_editmode']
+        if modifier.type == "SUBSURF":
+            modifier.levels = mod_settings["levels"]
+        modifier.show_viewport = mod_settings["show_viewport"]
+        modifier.show_in_editmode = mod_settings["show_in_editmode"]
         # careful if this wouldn't be the last one could cause problems with for loop
-        if mod_settings['virtual']:
+        if mod_settings["virtual"]:
             obj.modifiers.remove(modifier)
 
 
@@ -199,14 +209,17 @@ def get_subdivision_modifier_level(obj):
     Returns:
     int: The subdivision modifier level (number of subdivisions), or None if no subdivision modifier is present.
     """
-    if obj is not None and obj.type == 'MESH':
+    if obj is not None and obj.type == "MESH":
         for modifier in obj.modifiers:
-            if modifier.type == 'SUBSURF':
+            if modifier.type == "SUBSURF":
                 if modifier.show_in_editmode and modifier.show_viewport:
                     return modifier.levels
     return None
 
-def process_vertex_raycast(i, bm_eval, offset_verts_hit_positions, user_preferences, target_objects, obj):
+
+def process_vertex_raycast(
+    i, bm_eval, offset_verts_hit_positions, user_preferences, target_objects, obj
+):
     """
     Process a single vertex in the mesh to calculate its offset based on raycasting.
 
@@ -227,13 +240,17 @@ def process_vertex_raycast(i, bm_eval, offset_verts_hit_positions, user_preferen
     world_source_position = ob_matrix_world @ res_v.co
 
     # Transform vertex normal to world space
-    world_cast_direction = ob_matrix_world.to_3x3().transposed().inverted() @ -res_v.normal
+    world_cast_direction = (
+        ob_matrix_world.to_3x3().transposed().inverted() @ -res_v.normal
+    )
     world_cast_direction.normalize()
 
     # Get the closest hit on the target mesh
-    hit_position = get_closest_ray_hit(objects=target_objects,
-                                       source_position=world_source_position,
-                                       cast_direction=world_cast_direction)
+    hit_position = get_closest_ray_hit(
+        objects=target_objects,
+        source_position=world_source_position,
+        cast_direction=world_cast_direction,
+    )
 
     # add_arrow(world_source_position, world_source_position + world_cast_direction * .01, RED)
 
@@ -250,8 +267,12 @@ def process_vertex_raycast(i, bm_eval, offset_verts_hit_positions, user_preferen
         if difference.length < user_preferences.max_distance:
             # let's not draw radical overshoots that won't be counted anyway.
             color = (min(1, l), max(0, 1 - l), 0.0, 0.1)
-            draw.add_arrow(world_source_position, hit_position, color,
-                      scale=user_preferences.arrow_scale)
+            draw.add_arrow(
+                world_source_position,
+                hit_position,
+                color,
+                scale=user_preferences.arrow_scale,
+            )
 
             for f in res_v.link_faces:
                 draw.add_face(f, obj, color)
@@ -262,11 +283,19 @@ def process_vertex_raycast(i, bm_eval, offset_verts_hit_positions, user_preferen
     offset_verts_hit_positions[i] = (hit_position, difference)
 
 
-def calculate_offset(bm_eval, offset_verts_indices, offset_verts_hit_positions, v_index, user_preferences,
-                     target_objects, depsgraph):
-    '''Calculate offset of vertices. takes the whole groups of vertices that are taken into account (by now middle of connecting edges).
-    it calculates the offset with weights, where longer edges get higher weight than shorter'''
-    user_preferences = bpy.context.preferences.addons['final_topology'].preferences
+def calculate_offset(
+    bm_eval,
+    offset_verts_indices,
+    offset_verts_hit_positions,
+    v_index,
+    user_preferences,
+    target_objects,
+    depsgraph,
+):
+    """Calculate offset of vertices. takes the whole groups of vertices that are taken into account (by now middle of connecting edges).
+    it calculates the offset with weights, where longer edges get higher weight than shorter
+    """
+    user_preferences = bpy.context.preferences.addons["final_topology"].preferences
 
     total_difference = Vector((0, 0, 0))
     results_counted = 0
@@ -296,13 +325,13 @@ def calculate_offset(bm_eval, offset_verts_indices, offset_verts_hit_positions, 
                     total_difference += difference
                 elif len(offset_verts_indices) > 1:
                     dist = distances[range_i]
-                    if user_preferences.weight_algorithm == 'FIRSTONLY':
+                    if user_preferences.weight_algorithm == "FIRSTONLY":
                         others_weight = 0
-                    elif user_preferences.weight_algorithm == 'ALL1':
+                    elif user_preferences.weight_algorithm == "ALL1":
                         others_weight = 1
-                    elif user_preferences.weight_algorithm == 'FIRST':
+                    elif user_preferences.weight_algorithm == "FIRST":
                         others_weight = 1 / (len(offset_verts_indices) - 1)
-                    elif user_preferences.weight_algorithm == 'FIRSTDIST':
+                    elif user_preferences.weight_algorithm == "FIRSTDIST":
                         if total_distance == 0:
                             others_weight = 1
                         else:
@@ -317,20 +346,46 @@ def calculate_offset(bm_eval, offset_verts_indices, offset_verts_hit_positions, 
     return offset
 
 
-def inverse_subdivide_step(self, context, target_objects, iterations=1, neighbours=1):
+def final_topology_optimization_step(self, context, iterations=1, neighbours=1):
+    """Runs all optimization steps:
+    - inverse subdivide
+    - constraints
+    (these should be the same after addon rewrite)
+    """
     # bpy.context.view_layer.update()
-    user_preferences = bpy.context.preferences.addons['final_topology'].preferences
-    obj = bpy.context.edit_object
-    me = obj.data
-    bm = bmesh.from_edit_mesh(me)
-    # bmesh.update_edit_mesh(me)
+    user_preferences = bpy.context.preferences.addons["final_topology"].preferences
+    s_levels = get_subdivision_modifier_level(self.object)
+    # Keep running, but do nothing
+    if s_levels is None:
+        self.report(
+            {"WARNING"},
+            "Only objects with subdivision modifier are supported by now.",
+        )
+        return False
 
-    selected_verts = [v for v in bm.verts if v.select]
+    #  this needs proper iteration of real neighbours, should actually try to find the 4 center vertices around if more levels are there.
+    self.level_subs_neighbours = 1 * 2 ** (s_levels - 1)
+    # get inverse subdivision target objects
+    target_objects = get_target_objects(self)
+    if len(target_objects) == 0:
+        if not self.warning_posted:
+            self.warning_posted = True
+            bpy.ops.wm.final_topo_popup_dialog(
+                "INVOKE_DEFAULT",
+                message="Inverse-subdivide target objects should be visible mesh objects.\n "
+                "Please check your settup in the snap settings.",
+                width=600,
+            )
+        return False
+
+    me = self.object.data
+    bm_edit = bmesh.from_edit_mesh(me)
+    selected_verts = [v for v in bm_edit.verts if v.select]
     # neighbors are all vertices (selected and neighbors) of the edit mesh that can be tweaked.
     neighbors = get_neighbors_within_levels(selected_verts, neighbours)
 
     depsgraph = bpy.context.evaluated_depsgraph_get()
-    bm_eval = utils.get_evaluated_bm(obj, depsgraph)
+    bm_eval = utils.get_evaluated_bm(self.object, depsgraph)
 
     # we need to ray-cast every iteration.
     # let's get the neighbours for each vert separately on the subdivided mesh
@@ -338,8 +393,10 @@ def inverse_subdivide_step(self, context, target_objects, iterations=1, neighbou
     for v in neighbors:
         offset_verts = [bm_eval.verts[v.index]]
         # get neighbours on eval mesh
-        if user_preferences.weight_algorithm != 'FIRSTONLY':
-            offset_verts = get_neighbors_subdivide_levels(offset_verts, self.level_subs_neighbours)
+        if user_preferences.weight_algorithm != "FIRSTONLY":
+            offset_verts = get_neighbors_subdivide_levels(
+                offset_verts, self.level_subs_neighbours
+            )
         # store the indices of the offset verts(basically cage vert with it's neighbours) per vertex
         offset_verts_indices[v.index] = [v.index for v in offset_verts]
 
@@ -351,32 +408,46 @@ def inverse_subdivide_step(self, context, target_objects, iterations=1, neighbou
 
     for a in range(0, iterations):
         draw.clear_draw_list()
+        if a > 0:
+            # we need to evaluate result subdivided mesh every iteration,
+            # so need a fresh bm_eval, except for first iteration
+            depsgraph = bpy.context.evaluated_depsgraph_get()
+            bm_eval = utils.get_evaluated_bm(self.object, depsgraph)
 
         if has_extras:
-            bm = extras.evaluate_constraints(obj,bm)
-        # we need to evaluate result subdivided mesh every iteration,
-        # so need a fresh bm_eval, except for first iteration
-        if a > 0:
-            depsgraph = bpy.context.evaluated_depsgraph_get()
-            bm_eval = utils.get_evaluated_bm(obj, depsgraph)
+            bm_edit.verts.ensure_lookup_table()
+
+            bm_edit = extras.evaluate_constraints(
+                self.object, bmesh_edit=bm_edit, bmesh_eval=bm_eval
+            )
+        bm_edit = bmesh.from_edit_mesh(me)
 
         # we need to ray-cast every iteration.
         offset_verts_hit_positions = {}
         for i in unique_indices:
             # raycast logic
-            process_vertex_raycast(i, bm_eval, offset_verts_hit_positions, user_preferences, target_objects,
-                                   obj)
-
-
+            process_vertex_raycast(
+                i,
+                bm_eval,
+                offset_verts_hit_positions,
+                user_preferences,
+                target_objects,
+                self.object,
+            )
 
         for v in neighbors:
             if offset_verts_indices.get(v.index) is None:
                 # TODO find out why sometimes the key isn't in the dict, otherwise this condition wouldn't be here.
                 continue
-            offset = calculate_offset(bm_eval, offset_verts_indices[v.index],
-                                      offset_verts_hit_positions, v.index, user_preferences,
-                                      target_objects, depsgraph)
-
+            offset = calculate_offset(
+                bm_eval,
+                offset_verts_indices[v.index],
+                offset_verts_hit_positions,
+                v.index,
+                user_preferences,
+                target_objects,
+                depsgraph,
+            )
 
             # align offset with vert normal.
             if offset.length > 0:
@@ -389,46 +460,50 @@ def inverse_subdivide_step(self, context, target_objects, iterations=1, neighbou
 
                 v.co += v_normal_offset
 
-
-
         bmesh.update_edit_mesh(me)
+    return True
 
 
 def get_target_objects(self):
     # Define which objects to raycast against
-    user_preferences = bpy.context.preferences.addons['final_topology'].preferences
+    user_preferences = bpy.context.preferences.addons["final_topology"].preferences
 
     target_objects = []
     if user_preferences.use_object_or_collection == "COLLECTION":
         for ob in bpy.context.scene.inverse_subdivide_target_collection.objects:
-            if ob.type == 'MESH' and ob.visible_get():
+            if ob.type == "MESH" and ob.visible_get():
                 target_objects.append(ob)
     elif user_preferences.use_object_or_collection == "OBJECT":
         tob = bpy.context.scene.inverse_subdivide_target_object
-        if tob is not None and tob.type == 'MESH' and tob.hide_viewport is False:
+        if tob is not None and tob.type == "MESH" and tob.hide_viewport is False:
             target_objects.append(tob)
 
     else:
         # get all visible objects for scene option
-        target_objects = [obj for obj in bpy.context.scene.objects if
-                          (obj.visible_get() and obj.type == 'MESH' and obj != self.object)]
+        target_objects = [
+            obj
+            for obj in bpy.context.scene.objects
+            if (obj.visible_get() and obj.type == "MESH" and obj != self.object)
+        ]
     return target_objects
 
 
 class InverseSubdivideStep(Operator):
-    bl_idname = "mesh.inverse_subdivide_step"
+    bl_idname = "mesh.final_topology_optimization_step"
     bl_label = "Inverse Subdivide Snapping Step"
-    bl_description = "Run the subdivision compensation one step. " \
-                     "\n\nIf you need stable behaviour and \n" \
-                     "want only use the tool locally, run this operator whenever needed"
-    bl_options = {'REGISTER', 'UNDO'}
+    bl_description = (
+        "Run the subdivision compensation one step. "
+        "\n\nIf you need stable behaviour and \n"
+        "want only use the tool locally, run this operator whenever needed"
+    )
+    bl_options = {"REGISTER", "UNDO"}
 
     iterations: bpy.props.IntProperty(
         name="Iterations",
         default=20,
         min=1,
         max=500,
-        description="Number of iterations for vertex position compensation. \n Quite slow when over 50"
+        description="Number of iterations for vertex position compensation. \n Quite slow when over 50",
     )
 
     neighbours: bpy.props.IntProperty(
@@ -436,47 +511,26 @@ class InverseSubdivideStep(Operator):
         default=1,
         min=1,
         max=500,
-        description="Number of neighbours to take into account for each vertex. \n Higher number will result in more accurate results, but in complex areas can screw up."
+        description="Number of neighbours to take into account for each vertex. \n Higher number will result in more accurate results, but in complex areas can screw up.",
     )
 
     warning_posted = BoolProperty(default=False)
 
     def execute(self, context):
-        user_preferences = bpy.context.preferences.addons['final_topology'].preferences
+        user_preferences = bpy.context.preferences.addons["final_topology"].preferences
 
         # check if there's subdivision modifier
         self.object = bpy.context.active_object
         modifiers_state_start = set_modifiers_start(self.object)
-        s_levels = get_subdivision_modifier_level(self.object)
-        # Keep running, but do nothing
-        if s_levels is None:
-            self.report({"WARNING"}, "Only objects with subdivision modifier are supported by now.")
-            return {'CANCELLED'}
 
-        #  this needs proper iteration of real neighbours, should actually try to find the 4 center vertices around if more levels are there.
-        self.level_subs_neighbours = 1 * 2 ** (s_levels - 1)
-
-        draw.clear_draw_list()
-        # just testing if constraints would be possible here.
-        # bpy.ops.mesh.flatten_selection()
-        tool_settings = context.tool_settings
-        # on click release and the options
-
-        target_objects = get_target_objects(self)
-
-        if len(target_objects) == 0:
-            if not self.warning_posted:
-                self.warning_posted = True
-                bpy.ops.wm.final_topo_popup_dialog('INVOKE_DEFAULT',
-                                                   message="Inverse-subdivide target objects should be visible mesh objects.\n "
-                                                           "Please check your settup in the snap settings.",
-                                                   width=600)
-            return {'CANCELLED'}
-
-        inverse_subdivide_step(self, context, target_objects, self.iterations, self.neighbours)
+        done = final_topology_optimization_step(
+            self, context, self.iterations, self.neighbours
+        )
+        if not done:
+            return {"CANCELLED"}
 
         set_modifiers_end(self.object, modifiers_state_start)
-        return {'FINISHED'}
+        return {"FINISHED"}
 
     def invoke(self, context, event):
         return self.execute(context)
@@ -485,11 +539,12 @@ class InverseSubdivideStep(Operator):
 class InverseSubdivideModal(Operator):
     bl_idname = "mesh.inverse_subdivide_modal"
     bl_label = "Inverse Subdivide Snapping Modal"
-    bl_description = "Start compensating for inverse subdivision." \
-                     "\n\nUse CTRL during transorms to initiate." \
-                     "\nDo not combine with face projection if you snap larger parts of mesh"
-    bl_options = {'REGISTER', 'UNDO'}
-
+    bl_description = (
+        "Start compensating for inverse subdivision."
+        "\n\nUse CTRL during transorms to initiate."
+        "\nDo not combine with face projection if you snap larger parts of mesh"
+    )
+    bl_options = {"REGISTER", "UNDO"}
 
     warning_posted = BoolProperty(default=False)
 
@@ -502,83 +557,87 @@ class InverseSubdivideModal(Operator):
     def handle_event(self, context, event, user_preferences):
         global running_operator
 
-        if user_preferences.enable_operator == False or running_operator is None or bpy.context.mode != 'EDIT_MESH':
+        if (
+            user_preferences.enable_operator == False
+            or running_operator is None
+            or bpy.context.mode != "EDIT_MESH"
+        ):
             wm = context.window_manager
             try:
                 wm.event_timer_remove(self._timer)
             except:
                 pass
-            bpy.types.SpaceView3D.draw_handler_remove(self._handle, 'WINDOW')
-            bpy.types.SpaceView3D.draw_handler_remove(self._2d_handle, 'WINDOW')
+            bpy.types.SpaceView3D.draw_handler_remove(self._handle, "WINDOW")
+            bpy.types.SpaceView3D.draw_handler_remove(self._2d_handle, "WINDOW")
             running_operator = None
             draw.clear_draw_list()
             user_preferences.enable_operator = False
             set_modifiers_end(self.object, self.modifiers_state_start)
-            return {'CANCELLED'}
+            return {"CANCELLED"}
 
-        return {'PASS_THROUGH'}
+        return {"PASS_THROUGH"}
 
     def modal(self, context, event):
-        user_preferences = bpy.context.preferences.addons['final_topology'].preferences
+        user_preferences = bpy.context.preferences.addons["final_topology"].preferences
 
         # check if there's subdivision modifier
 
-        is_timer = event.type == 'TIMER' and user_preferences.use_timer and user_preferences.always_on
-        if (event.type == 'LEFTMOUSE' or
-            is_timer) \
-                and context.mode == 'EDIT_MESH':
+        is_timer = (
+            event.type == "TIMER"
+            and user_preferences.use_timer
+            and user_preferences.always_on
+        )
+        if (event.type == "LEFTMOUSE" or is_timer) and context.mode == "EDIT_MESH":
             self.object = bpy.context.active_object
-            s_levels = get_subdivision_modifier_level(self.object)
-
-            #  this needs proper iteration of real neighbours, should actually try to find the 4 center vertices around if more levels are there.
-            self.level_subs_neighbours = 1 * 2 ** (s_levels - 1)
 
             draw.clear_draw_list()
-            # just testing if constraints would be possible here.
-            # bpy.ops.mesh.flatten_selection()
             tool_settings = context.tool_settings
+
             # on click release and the options
-            if (event.value == 'RELEASE' or is_timer) \
-                    and (
-                    event.ctrl or (tool_settings.use_snap and not event.ctrl)
-                    or user_preferences.always_on):
-                target_objects = get_target_objects(self)
-
-                if len(target_objects) == 0:
-                    if not self.warning_posted:
-                        self.warning_posted = True
-                        bpy.ops.wm.final_topo_popup_dialog('INVOKE_DEFAULT',
-                                                           message="Inverse-subdivide target objects should be visible mesh objects.\n "
-                                                                   "Please check your settup in the snap settings.",
-                                                           width=600)
-                    return {'RUNNING_MODAL'}
-
-                inverse_subdivide_step(self,context, target_objects, user_preferences.iterations, user_preferences.neighbours)
+            if (event.value == "RELEASE" or is_timer) and (
+                event.ctrl
+                or (tool_settings.use_snap and not event.ctrl)
+                or user_preferences.always_on
+            ):
+                done = final_topology_optimization_step(
+                    self,
+                    context,
+                    user_preferences.iterations,
+                    user_preferences.neighbours,
+                )
+                if not done:
+                    return {"RUNNING_MODAL"}
         return self.handle_event(context, event, user_preferences)
 
     def invoke(self, context, event):
         global running_operator
 
-        user_preferences = bpy.context.preferences.addons['final_topology'].preferences
+        user_preferences = bpy.context.preferences.addons["final_topology"].preferences
 
         # return if we are already running
         if running_operator is not None:
             user_preferences.enable_operator = False
             running_operator = None
-            return {'CANCELLED'}
+            return {"CANCELLED"}
 
         draw.clear_draw_list()
 
         # Add the region OpenGL drawing callback
         # draw in view space with 'POST_VIEW' and 'PRE_VIEW'
         args = (self, context)
-        self._handle = bpy.types.SpaceView3D.draw_handler_add(draw.draw_callback_px_3d, args, 'WINDOW', 'POST_VIEW')
-        self._2d_handle = bpy.types.SpaceView3D.draw_handler_add(draw.draw_callback_px_2d, args, 'WINDOW', 'POST_PIXEL')
+        self._handle = bpy.types.SpaceView3D.draw_handler_add(
+            draw.draw_callback_px_3d, args, "WINDOW", "POST_VIEW"
+        )
+        self._2d_handle = bpy.types.SpaceView3D.draw_handler_add(
+            draw.draw_callback_px_2d, args, "WINDOW", "POST_PIXEL"
+        )
 
         # if user_preferences.always_on and user_preferences.use_timer:
         # We start timer always, but use it only when the setting is enabled
         wm = context.window_manager
-        self._timer = wm.event_timer_add(0.3, window=context.window)  # 1 second interval
+        self._timer = wm.event_timer_add(
+            0.3, window=context.window
+        )  # 1 second interval
 
         context.window_manager.modal_handler_add(self)
         # set running operator to be aware of it already running
@@ -589,20 +648,22 @@ class InverseSubdivideModal(Operator):
         self.object = bpy.context.active_object
         self.modifiers_state_start = set_modifiers_start(self.object)
 
-        return {'RUNNING_MODAL'}
+        return {"RUNNING_MODAL"}
 
 
 def create_freeze_mesh_object():
     orig_ob = bpy.context.active_object
     orig_mode = bpy.context.mode
-    bpy.ops.object.mode_set(mode='OBJECT')
+    bpy.ops.object.mode_set(mode="OBJECT")
     bpy.ops.object.duplicate()
     freeze_mesh_object = bpy.context.active_object
-    freeze_mesh_object.name = 'FROZEN_MESH_STATE'
-    freeze_mesh_object.name = 'FROZEN_MESH_STATE'  # double setting name removes the .001s
+    freeze_mesh_object.name = "FROZEN_MESH_STATE"
+    freeze_mesh_object.name = (
+        "FROZEN_MESH_STATE"  # double setting name removes the .001s
+    )
 
     for m in freeze_mesh_object.modifiers:
-        if m.type != 'MIRROR':
+        if m.type != "MIRROR":
             m.show_viewport = False
             m.show_render = False
     # freeze_mesh_object.modifiers.clear()
@@ -612,22 +673,22 @@ def create_freeze_mesh_object():
 
     freeze_mesh_object.hide_render = True
 
-    m = freeze_mesh_object.modifiers.new('Subdivision', 'SUBSURF')
+    m = freeze_mesh_object.modifiers.new("Subdivision", "SUBSURF")
     m.levels = 5
     utils.activate_object(orig_ob)
-    bpy.ops.object.mode_set(mode='EDIT')
-    prefs = bpy.context.preferences.addons['final_topology'].preferences
+    bpy.ops.object.mode_set(mode="EDIT")
+    prefs = bpy.context.preferences.addons["final_topology"].preferences
     prefs.use_object_or_collection = "OBJECT"
     bpy.context.scene.inverse_subdivide_target_object = freeze_mesh_object
     return freeze_mesh_object
 
 
 def delete_frozen_mesh():
-    prefs = bpy.context.preferences.addons['final_topology'].preferences
+    prefs = bpy.context.preferences.addons["final_topology"].preferences
     # bpy.ops.object.mode_set(mode='OBJECT')
 
     # bpy.ops.object.select_all(action='DESELECT')
-    object = bpy.data.objects.get('FROZEN_MESH_STATE')
+    object = bpy.data.objects.get("FROZEN_MESH_STATE")
     if object is not None:
         bpy.data.objects.remove(object)
     prefs.use_object_or_collection = "SCENE"
@@ -636,18 +697,21 @@ def delete_frozen_mesh():
 class FreezeShape(bpy.types.Operator):
     bl_idname = "mesh.freeze_shape"
     bl_label = "Freeze Subdivision Shape"
-    bl_description = "Switch on the Modal operator or perform Inverse Subdivide steps." \
-                      "\n\nCreates a copy of self and switches on snapping to it." \
-                      "\nUse to reorganize your topology, but try to preserve shape."
-    bl_options = {'REGISTER', 'UNDO'}
+    bl_description = (
+        "Switch on the Modal operator or perform Inverse Subdivide steps."
+        "\n\nCreates a copy of self and switches on snapping to it."
+        "\nUse to reorganize your topology, but try to preserve shape."
+    )
+    bl_options = {"REGISTER", "UNDO"}
 
     def execute(self, context):
-        object = bpy.data.objects.get('FROZEN_MESH_STATE')
+        object = bpy.data.objects.get("FROZEN_MESH_STATE")
         if object is not None:
             delete_frozen_mesh()
         else:
             create_freeze_mesh_object()
-        return {'FINISHED'}
+        return {"FINISHED"}
+
 
 def custom_unsubdivide(bm, mesh, levels):
     # Step 1: Identify starting vertices (corners or verts with edge count != 4)
@@ -656,7 +720,7 @@ def custom_unsubdivide(bm, mesh, levels):
     # Step 2: Find all original vertices by traversing the mesh
     checked_edges = set()
     checked_verts = set()
-    step = 2 ** levels  # Calculate the step size based on the levels of unsubdivide
+    step = 2**levels  # Calculate the step size based on the levels of unsubdivide
 
     def traverse_from_start(start_vert, step):
         """Recursive function to traverse and find original vertices."""
@@ -697,13 +761,19 @@ def custom_unsubdivide(bm, mesh, levels):
         traverse_from_start(v, step)
 
     # Step 3: Dissolve edges that are not part of the original mesh
-    bmesh.ops.dissolve_edges(bm, edges=[e for e in bm.edges if e not in checked_edges],
-                             use_verts=True, use_face_split=True)
+    bmesh.ops.dissolve_edges(
+        bm,
+        edges=[e for e in bm.edges if e not in checked_edges],
+        use_verts=True,
+        use_face_split=True,
+    )
     bmesh.update_edit_mesh(mesh)
 
 
 def dissolve_tris_to_ngons(bm):
-    dissolve_ngons_verts = []  # list of verts that are in the middle of a potential n-gon.
+    dissolve_ngons_verts = (
+        []
+    )  # list of verts that are in the middle of a potential n-gon.
 
     for v in bm.verts:
         all_tris = True
@@ -720,18 +790,20 @@ def dissolve_tris_to_ngons(bm):
 class FinalUnsubdivide(bpy.types.Operator):
     bl_idname = "object.final_unsubdivide"
     bl_label = "Final Unsubdivide"
-    bl_description = "Unsubdivide mesh. " \
-                     "\n\nWorks on meshes that had subdivision surface applied." \
-                     "\n won't work on triangulated meshes." \
-                     "\nFor high precision, increase number of iterations (up to 500) and wait! ;)"
-    bl_options = {'REGISTER', 'UNDO'}
+    bl_description = (
+        "Unsubdivide mesh. "
+        "\n\nWorks on meshes that had subdivision surface applied."
+        "\n won't work on triangulated meshes."
+        "\nFor high precision, increase number of iterations (up to 500) and wait! ;)"
+    )
+    bl_options = {"REGISTER", "UNDO"}
 
     unsubdivide_levels: bpy.props.IntProperty(
         name="Unsubdivide Levels",
         default=2,
         min=1,
         max=10,
-        description="Number of levels to unsubdivide"
+        description="Number of levels to unsubdivide",
     )
 
     iterations: bpy.props.IntProperty(
@@ -739,13 +811,13 @@ class FinalUnsubdivide(bpy.types.Operator):
         default=5,
         min=1,
         max=500,
-        description="Number of iterations for vertex compensation. \n Quite slow when over 50"
+        description="Number of iterations for vertex compensation. \n Quite slow when over 50",
     )
 
     prefer_ngons: bpy.props.BoolProperty(
         name="Prefer Ngons",
         default=True,
-        description="Favour Ngons over Tris wherever possible"
+        description="Favour Ngons over Tris wherever possible",
     )
 
     def execute(self, context):
@@ -757,11 +829,13 @@ class FinalUnsubdivide(bpy.types.Operator):
         bpy.ops.object.duplicate()
         duplicate_object = bpy.context.active_object
         duplicate_object.name = original_object.name + "_unsubdivided"
-        bpy.ops.object.mode_set(mode='EDIT')
+        bpy.ops.object.mode_set(mode="EDIT")
 
         bm = bmesh.from_edit_mesh(duplicate_object.data)
 
-        bmesh.ops.unsubdivide(bm, verts=bm.verts, iterations=self.unsubdivide_levels * 2)
+        bmesh.ops.unsubdivide(
+            bm, verts=bm.verts, iterations=self.unsubdivide_levels * 2
+        )
         # custom_unsubdivide(bm, duplicate_object.data, self.unsubdivide_levels)
 
         # Step 3: Dissolve tris to ngons, if enabled. gets better results in most of cases where the original
@@ -770,12 +844,12 @@ class FinalUnsubdivide(bpy.types.Operator):
             dissolve_tris_to_ngons(bm)
 
         # Step 4: Add Subdivision modifier
-        bpy.ops.object.modifier_add(type='SUBSURF')
+        bpy.ops.object.modifier_add(type="SUBSURF")
         subdivide_modifier = duplicate_object.modifiers["Subdivision"]
         subdivide_modifier.levels = self.unsubdivide_levels
 
         # Step 5: Switch to Edit mode
-        bpy.ops.object.mode_set(mode='EDIT')
+        bpy.ops.object.mode_set(mode="EDIT")
 
         # Step 6: Store original vertex positions
         bm = bmesh.from_edit_mesh(duplicate_object.data)
@@ -800,7 +874,7 @@ class FinalUnsubdivide(bpy.types.Operator):
                     offset_dict[i] = offset
 
             # Apply the offset to the original mesh vertices
-            bpy.ops.object.mode_set(mode='EDIT')
+            bpy.ops.object.mode_set(mode="EDIT")
             bm = bmesh.from_edit_mesh(duplicate_object.data)
             for vert in bm.verts:
                 if vert.index in offset_dict:
@@ -808,7 +882,7 @@ class FinalUnsubdivide(bpy.types.Operator):
 
             # Update & Free BMesh
             bmesh.update_edit_mesh(duplicate_object.data)
-            bpy.ops.object.mode_set(mode='OBJECT')
+            bpy.ops.object.mode_set(mode="OBJECT")
 
         # subdivide_modifier.show_viewport=False
-        return {'FINISHED'}
+        return {"FINISHED"}

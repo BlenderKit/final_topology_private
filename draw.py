@@ -1,10 +1,9 @@
+import bpy
+import bpy_extras
+import gpu
+import mathutils
 from gpu_extras.batch import batch_for_shader
 from gpu_extras.presets import draw_circle_2d
-
-import bpy_extras
-import mathutils
-import bpy
-import gpu
 from mathutils import Vector
 
 draw_lines = {}
@@ -32,35 +31,46 @@ def clear_draw_list():
 
 
 def add_line(v1, v2, col):
-    '''
-     Add a single line to the draw list
-    '''
+    """
+    Add a single line to the draw list
+    """
     global draw_lines
-    col_rounded = (round(col[0], 1), round(col[1], 1), round(col[2], 1), round(col[3], 1))
+    col_rounded = (
+        round(col[0], 1),
+        round(col[1], 1),
+        round(col[2], 1),
+        round(col[3], 1),
+    )
     line_set = draw_lines.get(col_rounded, [])
     line_set.append(v1.to_tuple())
     line_set.append(v2.to_tuple())
     draw_lines[col_rounded] = line_set
 
+
 def add_point(center, col):
     global draw_points
-    col_rounded = (round(col[0], 1), round(col[1], 1), round(col[2], 1), round(col[3], 1))
+    col_rounded = (
+        round(col[0], 1),
+        round(col[1], 1),
+        round(col[2], 1),
+        round(col[3], 1),
+    )
     point_set = draw_points.get(col_rounded, [])
     point_set.append(center)
     draw_points[col_rounded] = point_set
 
 
 def add_arrow(v1, v2, col, scale=3):
-    '''
-        Add an arrow to the draw list
-    '''
+    """
+    Add an arrow to the draw list
+    """
     global draw_lines
     direction = v2 - v1
     if direction.length < 0.0001:
         return
     col = (round(col[0], 1), round(col[1], 1), round(col[2], 1), round(col[3], 1))
 
-    user_preferences = bpy.context.preferences.addons['final_topology'].preferences
+    user_preferences = bpy.context.preferences.addons["final_topology"].preferences
     if user_preferences.enable_draw_arrows is False:
         return
     arrow_length_fraction = 0.5
@@ -84,8 +94,16 @@ def add_arrow(v1, v2, col, scale=3):
 
     # Calculate the points of the arrowhead
     arrow_tip = v2
-    arrow_left = arrow_tip - arrow_length * direction + arrow_width * mathutils.Vector((-direction.y, direction.x, 0))
-    arrow_right = arrow_tip - arrow_length * direction - arrow_width * mathutils.Vector((-direction.y, direction.x, 0))
+    arrow_left = (
+        arrow_tip
+        - arrow_length * direction
+        + arrow_width * mathutils.Vector((-direction.y, direction.x, 0))
+    )
+    arrow_right = (
+        arrow_tip
+        - arrow_length * direction
+        - arrow_width * mathutils.Vector((-direction.y, direction.x, 0))
+    )
 
     # Add the arrowhead lines to the draw list
     line_set.append(arrow_tip.to_tuple())
@@ -98,12 +116,12 @@ def add_arrow(v1, v2, col, scale=3):
 
 
 def add_face(bm_face, object, col):
-    '''
-        Add a single face to the draw list
-    '''
+    """
+    Add a single face to the draw list
+    """
     global draw_faces
     global draw_faces_list
-    user_preferences = bpy.context.preferences.addons['final_topology'].preferences
+    user_preferences = bpy.context.preferences.addons["final_topology"].preferences
     if user_preferences.enable_draw_faces is False:
         return
 
@@ -128,11 +146,10 @@ def add_face(bm_face, object, col):
         print("The provided bm_face is not a quad.")
 
 
-
 def draw_callback_px_2d(self, context):
-    '''
+    """
     Draw text in the 3D Viewport.
-    '''
+    """
     # this is to avoid spamming console after errors
     global draw_lines
 
@@ -145,29 +162,34 @@ def draw_callback_px_2d(self, context):
 
 
 def draw_callback_px_3d(self, context):
-    '''
+    """
     Draw lines and faces in the 3D Viewport.
-    '''
+    """
     # this is to avoid spamming console after errors
     global draw_lines, draw_faces
     # 50% alpha, 2 pixel width line
-    if bpy.context.mode != 'EDIT_MESH':
+    if bpy.context.mode != "EDIT_MESH":
         return
 
     if bpy.app.version < (4, 0, 0):
-        shader = gpu.shader.from_builtin('3D_UNIFORM_COLOR')
+        shader = gpu.shader.from_builtin("3D_UNIFORM_COLOR")
     else:
-        shader = gpu.shader.from_builtin('UNIFORM_COLOR')
+        shader = gpu.shader.from_builtin("UNIFORM_COLOR")
 
-    gpu.state.blend_set('ALPHA')
+    gpu.state.blend_set("ALPHA")
     gpu.state.line_width_set(4.0)
 
-    user_preferences = bpy.context.preferences.addons['final_topology'].preferences
+    user_preferences = bpy.context.preferences.addons["final_topology"].preferences
     if user_preferences.enable_draw_arrows or user_preferences.enable_draw_constraints:
         # print('line sets', len(draw_lines))
         for col, lines in draw_lines.items():
-            batch = batch_for_shader(shader, 'LINES', {"pos": lines})
-            col_with_alpha = (col[0], col[1], col[2], col[3]*user_preferences.overlays_alpha)
+            batch = batch_for_shader(shader, "LINES", {"pos": lines})
+            col_with_alpha = (
+                col[0],
+                col[1],
+                col[2],
+                col[3] * user_preferences.overlays_alpha,
+            )
 
             shader.uniform_float("color", col_with_alpha)
 
@@ -183,14 +205,19 @@ def draw_callback_px_3d(self, context):
                 tris.extend([quad[2], quad[3], quad[0]])
 
             # Create the batch
-            batch = batch_for_shader(shader, 'TRIS', {"pos": tris})
-            col_with_alpha = (col[0], col[1], col[2], col[3]*user_preferences.overlays_alpha)
+            batch = batch_for_shader(shader, "TRIS", {"pos": tris})
+            col_with_alpha = (
+                col[0],
+                col[1],
+                col[2],
+                col[3] * user_preferences.overlays_alpha,
+            )
             shader.uniform_float("color", col_with_alpha)
             batch.draw(shader)
 
     for col, points in draw_points.items():
         for point in points:
-            draw_circle_2d(point, col, .01, segments=6)
+            draw_circle_2d(point, col, 0.001, segments=4)
 
             # batch = batch_for_shader(shader, 'LINES', {"pos": lines})
             # col_with_alpha = (col[0], col[1], col[2], 0.25)
@@ -216,7 +243,5 @@ def draw_callback_px_3d(self, context):
             #     draw_circle_2d((coords_2d.x, coords_2d.y),col_with_alpha, radius)
 
     # restore opengl defaults
-    gpu.state.blend_set('NONE')
+    gpu.state.blend_set("NONE")
     # ...
-
-

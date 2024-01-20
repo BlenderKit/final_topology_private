@@ -31,9 +31,7 @@ If your bug is related to specific model or project and .blend file is required 
 
 ## Basic instructions:
 After installing the addon, find it in the Edit tab of the Sidebar in 3D view.
-
-You need to have a mesh that has Subdivision surface modifier on. Any other modifiers will turn off during interaction.
-
 Read tooltips directly in the add-on every button should have enough info to use the tool.
 
-![interface.jpg](..%2F..%2F..%2Fvids%2Fantisubsurf%2Finterface.jpg)
+### Quick start:
+You need to have a mesh that has Subdivision surface modifier on. For retopology, you can have .
