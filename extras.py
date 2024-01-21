@@ -1030,7 +1030,7 @@ def check_constraints_cache(object):
     if len(constraints_cache) != len(object.data.ft_custom_constraints):
         for c in object.data.ft_custom_constraints:
             cc_dict = {}
-            if c.constraint_type == "CURVE":
+            if c.constraint_type == "CURVE" and c.target_curve is not None:
                 endpoints_only = not c.target_curve.data.splines[0].use_cyclic_u
                 kd = build_kd_curve_cache(
                     c.target_curve,
@@ -1196,6 +1196,8 @@ def update_constraint_data(self, context):
     global constraints_cache
     constraints_cache = []
 
+def filter_curves(self, object):
+    return object.type == "CURVE"
 
 class CustomConstraint(bpy.types.PropertyGroup):
     name: bpy.props.StringProperty(name="Name")
@@ -1237,7 +1239,7 @@ class CustomConstraint(bpy.types.PropertyGroup):
         name="Color", size=3, default=(1.0, 0.0, 0.0), subtype="COLOR"
     )
     target_curve: bpy.props.PointerProperty(
-        type=bpy.types.Object, name="Target Curve", update=update_constraint_data
+        type=bpy.types.Object, name="Target Curve", update=update_constraint_data, poll=filter_curves
     )
     curve_snapping: bpy.props.EnumProperty(
         name="Curve Snapping",
@@ -1297,16 +1299,17 @@ class VIEW3D_PT_final_topology_constraints(Panel):
         col = row.column(align=True)
         col.operator("object.final_topology_add_constraint", icon="ADD", text="")
         col.operator("object.final_topology_delete_constraint", icon="REMOVE", text="")
-        row = layout.row(align=True)
-        op = row.operator(
-            "object.final_topology_add_selection_to_constraint", text="Add Selection"
-        )
-        op.remove = False
-        op = row.operator(
-            "object.final_topology_add_selection_to_constraint",
-            text="Remove Selection",
-        )
-        op.remove = True
+        if len(mesh.ft_custom_constraints) > 0:
+            row = layout.row(align=True)
+            op = row.operator(
+                "object.final_topology_add_selection_to_constraint", text="Add Selection"
+            )
+            op.remove = False
+            op = row.operator(
+                "object.final_topology_add_selection_to_constraint",
+                text="Remove Selection",
+            )
+            op.remove = True
 
         if len(mesh.ft_custom_constraints) > 0:
             ac = mesh.ft_custom_constraints[mesh.ft_custom_constraints_index]
@@ -1483,7 +1486,7 @@ class AddConstraintOperator(bpy.types.Operator):
     normal: bpy.props.FloatVectorProperty(
         name="Normal", size=3, default=(0.0, 0.0, 0.0)
     )
-    target_curve: bpy.props.PointerProperty(type=bpy.types.Object, name="Target Curve")
+    target_curve: bpy.props.PointerProperty(type=bpy.types.Object, name="Target Curve", poll=filter_curves)
     curve_snapping: bpy.props.EnumProperty(
         name="Curve Snapping",
         default="PROJECT_PLANE",
