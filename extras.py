@@ -5,7 +5,8 @@ import bmesh
 
 # this file has separate tools for experts in cad and automotive design
 import bpy
-from mathutils import Vector, kdtree, Matrix, Euler
+from mathutils import Vector, kdtree, Matrix, Euler, geometry
+
 
 # project into XY plane,
 up = Vector((0, 0, 1))
@@ -22,6 +23,8 @@ from bpy.props import (
 from bpy.types import Operator, GizmoGroup, Panel, PropertyGroup
 
 from . import draw, utils
+
+DEBUG_DRAW = False
 
 
 def kd_tree_from_bmesh(bm):
@@ -197,7 +200,7 @@ def flatten_verts_calculate(
     else:
         # Project the vertices onto the plane
         for vert in verts:
-            print(vert)
+            # print(vert)
             to_center = center - vert.co
             distance_to_plane = to_center.dot(normal)
             add_target_offset(target_offsets, vert.index, distance_to_plane * normal)
@@ -213,15 +216,15 @@ def flatten_verts(verts, method="best_fit", slide=False, center=None, normal=Non
 
 
 def project_point_to_plane(point, plane_center, plane_normal):
-    # Vector from plane center to the point
-    to_point = point - plane_center
+    """Project a point onto a plane and return the projected point"""
 
-    # Distance from the point to the plane along the plane normal
-    distance_to_plane = to_point.dot(plane_normal)
-
-    # Project the point onto the plane
-    projected_point = point - distance_to_plane * plane_normal
-
+    dist = geometry.distance_point_to_plane(point, plane_center, plane_normal)
+    projected_point = point - plane_normal * dist
+    if DEBUG_DRAW:
+        draw.add_arrow(
+            plane_center, plane_center + plane_normal, (1, 0, 0, 0.2), scale=1
+        )
+        draw.add_arrow(point, projected_point, (0.5, 0.5, 1, 0.2), scale=1)
     return projected_point
 
 
@@ -280,6 +283,17 @@ def line_line_intersection(p1, p2, p3, p4):
         return Vector((x, y, 0))
 
 
+def eval_point(co, curve_snapping="3D", source_curve=None):
+    if curve_snapping == "3D":
+        reference_co = co
+    elif curve_snapping == "PROJECT_PLANE":
+        curve_plane_normal = source_curve.rotation_euler.to_matrix() @ Vector((0, 0, 1))
+        reference_co = project_point_to_plane(
+            co, source_curve.location, curve_plane_normal
+        )
+    return reference_co
+
+
 def to_curve_verts_calculate(
     loop,
     curve_snapping="PROJECT_PLANE",
@@ -301,7 +315,8 @@ def to_curve_verts_calculate(
 
     # Transform the local Z-axis vector by the object's rotation matrix
     curve_plane_normal = source_curve.rotation_euler.to_matrix() @ local_z
-    print("curve_plane_normal", curve_plane_normal)
+    curve_plane_normal.normalize()
+    # print("curve_plane_normal", curve_plane_normal)
     # KD was not passed, build it
     if 1:  # kd is None:
         kd = build_kd_curve_cache(
@@ -331,38 +346,22 @@ def to_curve_verts_calculate(
     distance_traveled = 0
     target_distance = 0
     for i, vert in enumerate(loop[0]):
-        if curve_snapping == "3D":
-            reference_co = object_world_matrix @ vert.co
-            if i == 0:
-                # get first and last vertex for direction estimation
-                reference_co1 = object_world_matrix @ loop[0][i + 1].co
-                reference_co2 = object_world_matrix @ loop[0][i - 1].co
+        reference_co = eval_point(
+            object_world_matrix @ vert.co, curve_snapping, source_curve
+        )
+        if i == 0:
+            next_point_index = i + 1
+            if next_point_index >= len(loop[0]):
+                next_point_index = 0
 
-        elif curve_snapping == "PROJECT_PLANE":
-            reference_co = project_point_to_plane(
-                object_world_matrix @ vert.co, source_curve.location, curve_plane_normal
+            reference_co1 = eval_point(
+                object_world_matrix @ loop[0][next_point_index].co,
+                curve_snapping,
+                source_curve,
             )
-            print(
-                object_world_matrix @ vert.co,
-                reference_co,
-                source_curve.location,
-                curve_plane_normal,
+            reference_co2 = eval_point(
+                object_world_matrix @ loop[0][i - 1].co, curve_snapping, source_curve
             )
-            draw.add_point(reference_co, (1, 1, 0, 1))
-            if i == 0:
-                # get first vertex for direction estimation
-                reference_co1 = project_point_to_plane(
-                    object_world_matrix @ loop[0][i + 1].co,
-                    source_curve.location,
-                    curve_plane_normal,
-                )
-                reference_co2 = project_point_to_plane(
-                    object_world_matrix @ loop[0][i - 1].co,
-                    source_curve.location,
-                    curve_plane_normal,
-                )
-        else:
-            raise ValueError("method must be '3d' or 'projected'")
 
         if i == 0:
             # find first point on the curve for closed loops
@@ -370,18 +369,33 @@ def to_curve_verts_calculate(
                 co, index, dist = kd.find(reference_co)
                 target_offsets[vert.index] = co - reference_co
                 last_index = index
-                next_point = curve_world_matrix @ bmesh_curve.verts[last_index + 1].co
+                next_point_index = index + 1
+                if next_point_index >= len(bmesh_curve.verts):
+                    next_point_index = 0
+                next_point = eval_point(
+                    curve_world_matrix @ bmesh_curve.verts[next_point_index].co,
+                    curve_snapping,
+                    source_curve,
+                )
 
                 # estimate which direction to go by angle - this seems to be wrong by now
                 angle1 = (reference_co1 - reference_co).angle(next_point - co)
                 angle2 = (reference_co2 - reference_co).angle(next_point - co)
-                print(angle1, angle2)
+                # print(angle1, angle2)
                 if angle1 > angle2:
                     direction = -1
             else:
                 # find closest end point of the curve for open loops
-                curve_start = curve_world_matrix @ bmesh_curve.verts[0].co
-                curve_end = curve_world_matrix @ bmesh_curve.verts[-1].co
+                curve_start = eval_point(
+                    curve_world_matrix @ bmesh_curve.verts[0].co,
+                    curve_snapping,
+                    source_curve,
+                )
+                curve_end = eval_point(
+                    curve_world_matrix @ bmesh_curve.verts[-1].co,
+                    curve_snapping,
+                    source_curve,
+                )
 
                 dist_start = (reference_co - curve_start).length
                 dist_end = (reference_co - curve_end).length
@@ -395,7 +409,7 @@ def to_curve_verts_calculate(
 
                 last_index = index
 
-            start_point = curve_world_matrix @ bmesh_curve.verts[last_index].co
+            start_point = co
             target_offsets[vert.index] = co - reference_co
 
         else:
@@ -411,14 +425,24 @@ def to_curve_verts_calculate(
 
                 if last_index >= len(bmesh_curve.verts):
                     if not loop_closed:  # Finish for not closed loops
-                        end_point = curve_world_matrix @ bmesh_curve.verts[-1].co
+                        end_point = eval_point(
+                            curve_world_matrix @ bmesh_curve.verts[-1].co,
+                            curve_snapping,
+                            source_curve,
+                        )
+
                         target_offsets[vert.index] = end_point - reference_co
                         last_index -= 1  # get one step back for possible more points
                         break
                     last_index = 0  # Wrap around for cyclic curves
                 if last_index < 0:
                     if not loop_closed and i > 1:  # Finish for not closed loops
-                        end_point = curve_world_matrix @ bmesh_curve.verts[0].co
+                        end_point = eval_point(
+                            curve_world_matrix @ bmesh_curve.verts[0].co,
+                            curve_snapping,
+                            source_curve,
+                        )
+
                         target_offsets[vert.index] = end_point - reference_co
                         last_index += 1  # get one step back for possible more points
                         break
@@ -426,7 +450,12 @@ def to_curve_verts_calculate(
                         len(bmesh_curve.verts) - 1
                     )  # Wrap around for cyclic curves
 
-                end_point = curve_world_matrix @ bmesh_curve.verts[last_index].co
+                end_point = eval_point(
+                    curve_world_matrix @ bmesh_curve.verts[last_index].co,
+                    curve_snapping,
+                    source_curve,
+                )
+
                 distance_would_be_traveled = (
                     distance_traveled + (end_point - start_point).length
                 )
@@ -873,66 +902,6 @@ def set_selected_vertices(object, bm, verts):
 from mesh_looptools import *
 
 
-def do_circle(
-    object,
-    bm,
-    verts,
-    fit="best",
-    flatten=False,
-    custom_radius=True,
-    influence=10,
-    lock_x=False,
-    lock_y=False,
-    lock_z=False,
-    regular=False,
-    radius=0.35,
-    angle=0,
-):
-    # find loops
-    derived, bm_mod, single_vertices, single_loops, loops = circle_get_input(object, bm)
-    mapping = get_mapping(derived, bm, bm_mod, single_vertices, False, loops)
-    single_loops, loops = circle_check_loops(single_loops, loops, mapping, bm_mod)
-
-    move = []
-    for i, loop in enumerate(loops):
-        # best fitting flat plane
-        com, normal = calculate_plane(bm_mod, loop)
-        # if circular, shift loop so we get a good starting vertex
-        if loop[1]:
-            loop = circle_shift_loop(bm_mod, loop, com)
-        # flatten vertices on plane
-        locs_2d, p, q = circle_3d_to_2d(bm_mod, loop, com, normal)
-        # calculate circle
-        if fit == "best":
-            x0, y0, r = circle_calculate_best_fit(locs_2d)
-        else:  # self.fit == 'inside'
-            x0, y0, r = circle_calculate_min_fit(locs_2d)
-        # radius override
-        if custom_radius:
-            r = radius / p.length
-        # calculate positions on circle
-        if regular:
-            new_locs_2d = circle_project_regular(locs_2d[:], x0, y0, r, angle)
-        else:
-            new_locs_2d = circle_project_non_regular(locs_2d[:], x0, y0, r, angle)
-        # take influence into account
-        locs_2d = circle_influence_locs(locs_2d, new_locs_2d, influence)
-        # calculate 3d positions of the created 2d input
-        move.append(circle_calculate_verts(flatten, bm_mod, locs_2d, com, p, q, normal))
-        # flatten single input vertices on plane defined by loop
-        if flatten and single_loops:
-            move.append(
-                circle_flatten_singles(bm_mod, com, p, q, normal, single_loops[i])
-            )
-
-    # move vertices to new locations
-    if lock_x or lock_y or lock_z:
-        lock = [lock_x, lock_y, lock_z]
-    else:
-        lock = False
-    move_verts(object, bm, mapping, move, lock, -1)
-
-
 def move_verts_to_targets(bmesh_edit, target_offsets, weight=1.0):
     """Move vertices to target positions, using a dictionary of target positions"""
     for v_index in target_offsets.keys():
@@ -974,15 +943,16 @@ def build_kd_curve_cache(source_curve, endpoints_only=False, flatten=False):
                     co,
                     i,
                 )
-
-                draw.add_point(
-                    co,
-                    (1, 0, 0, 1),
-                )
+                if DEBUG_DRAW:
+                    draw.add_point(
+                        co,
+                        (1, 0, 0, 1),
+                    )
                 just_verts.append(co)
             else:
                 kd.insert(curve_world_matrix @ v.co, i)
-                draw.add_point(curve_world_matrix @ v.co, (1, 0, 0, 1))
+                if DEBUG_DRAW:
+                    draw.add_point(curve_world_matrix @ v.co, (1, 0, 0, 1))
                 just_verts.append(curve_world_matrix @ v.co)
     else:
         if flatten:
@@ -1004,20 +974,25 @@ def build_kd_curve_cache(source_curve, endpoints_only=False, flatten=False):
                 co_end,
                 size - 1,
             )
-            draw.add_point(
-                co_start,
-                (1, 0, 0, 1),
-            )
-            draw.add_point(
-                co_end,
-                (1, 0, 0, 1),
-            )
+            if DEBUG_DRAW:
+                draw.add_point(
+                    co_start,
+                    (1, 0, 0, 1),
+                )
+                draw.add_point(
+                    co_end,
+                    (1, 0, 0, 1),
+                )
         else:
             kd.insert(curve_world_matrix @ bmesh_curve.verts[0].co, 0)
             kd.insert(curve_world_matrix @ bmesh_curve.verts[-1].co, size - 1)
-
-            draw.add_point(curve_world_matrix @ bmesh_curve.verts[0].co, (1, 0, 0, 1))
-            draw.add_point(curve_world_matrix @ bmesh_curve.verts[-1].co, (1, 0, 0, 1))
+            if DEBUG_DRAW:
+                draw.add_point(
+                    curve_world_matrix @ bmesh_curve.verts[0].co, (1, 0, 0, 1)
+                )
+                draw.add_point(
+                    curve_world_matrix @ bmesh_curve.verts[-1].co, (1, 0, 0, 1)
+                )
 
     kd.balance()
     return kd
@@ -1082,6 +1057,9 @@ def evaluate_constraints(object, bmesh_edit=None, bmesh_eval=None):
                     center=Vector(c.center),
                     normal=Vector(c.normal),
                 )
+            world_matrix = object.matrix_world
+            utils.create_circle(world_matrix @ Vector(c.center), c.normal, 0.1, 20)
+
         # evaluate curve constraint
         elif c.constraint_type == "CURVE":
             if c.target_curve is not None and c.target_curve.type == "CURVE":
@@ -1100,7 +1078,15 @@ def evaluate_constraints(object, bmesh_edit=None, bmesh_eval=None):
                 )
         # move vertices to new locations
         # this has already weighting which might be a good idea with many constraints working together.
-        move_verts_to_targets(bmesh_edit, target_offsets, weight=1.0)
+        if DEBUG_DRAW:
+            for v_index in target_offsets.keys():
+                draw.add_arrow(
+                    bmesh_edit.verts[v_index].co,
+                    bmesh_edit.verts[v_index].co + target_offsets[v_index],
+                    (1, 0, 0, 1),
+                    scale=1,
+                )
+        move_verts_to_targets(bmesh_edit, target_offsets, weight=0.1)
 
     return bmesh_edit
 
@@ -1196,8 +1182,10 @@ def update_constraint_data(self, context):
     global constraints_cache
     constraints_cache = []
 
+
 def filter_curves(self, object):
     return object.type == "CURVE"
+
 
 class CustomConstraint(bpy.types.PropertyGroup):
     name: bpy.props.StringProperty(name="Name")
@@ -1215,14 +1203,14 @@ class CustomConstraint(bpy.types.PropertyGroup):
             #     "MOD_SUBSURF",
             #     3,
             # ),
-            ("CIRCLE", "Circle", "Circle constraint", "MESH_CIRCLE", 4),
-            (
-                "ANGLE",
-                "Angle",
-                "Limit angle for manufacturing purposes",
-                "LINCURVE",
-                5,
-            ),
+            # ("CIRCLE", "Circle", "Circle constraint", "MESH_CIRCLE", 4),
+            # (
+            #     "ANGLE",
+            #     "Angle",
+            #     "Limit angle for manufacturing purposes",
+            #     "LINCURVE",
+            #     5,
+            # ),
         ],
         update=update_constraint_data,
     )
@@ -1239,7 +1227,10 @@ class CustomConstraint(bpy.types.PropertyGroup):
         name="Color", size=3, default=(1.0, 0.0, 0.0), subtype="COLOR"
     )
     target_curve: bpy.props.PointerProperty(
-        type=bpy.types.Object, name="Target Curve", update=update_constraint_data, poll=filter_curves
+        type=bpy.types.Object,
+        name="Target Curve",
+        update=update_constraint_data,
+        poll=filter_curves,
     )
     curve_snapping: bpy.props.EnumProperty(
         name="Curve Snapping",
@@ -1302,7 +1293,8 @@ class VIEW3D_PT_final_topology_constraints(Panel):
         if len(mesh.ft_custom_constraints) > 0:
             row = layout.row(align=True)
             op = row.operator(
-                "object.final_topology_add_selection_to_constraint", text="Add Selection"
+                "object.final_topology_add_selection_to_constraint",
+                text="Add Selection",
             )
             op.remove = False
             op = row.operator(
@@ -1466,13 +1458,13 @@ class AddConstraintOperator(bpy.types.Operator):
             #     3,
             # ),
             # ("CIRCLE", "Circle", "Circle constraint", "MESH_CIRCLE", 4),
-            (
-                "ANGLE",
-                "Angle",
-                "Limit angle for manufacturing purposes",
-                "LINCURVE",
-                5,
-            ),
+            # (
+            #     "ANGLE",
+            #     "Angle",
+            #     "Limit angle for manufacturing purposes",
+            #     "LINCURVE",
+            #     5,
+            # ),
         ],
     )
     works_on_subdivision: bpy.props.BoolProperty(
@@ -1486,7 +1478,9 @@ class AddConstraintOperator(bpy.types.Operator):
     normal: bpy.props.FloatVectorProperty(
         name="Normal", size=3, default=(0.0, 0.0, 0.0)
     )
-    target_curve: bpy.props.PointerProperty(type=bpy.types.Object, name="Target Curve", poll=filter_curves)
+    target_curve: bpy.props.PointerProperty(
+        type=bpy.types.Object, name="Target Curve", poll=filter_curves
+    )
     curve_snapping: bpy.props.EnumProperty(
         name="Curve Snapping",
         default="PROJECT_PLANE",

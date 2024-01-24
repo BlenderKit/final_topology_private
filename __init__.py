@@ -357,6 +357,12 @@ class VIEW3D_PT_final_topology_objectmode(Panel):
 
     def draw(self, context):
         layout = self.layout
+        layout.operator()
+        op = layout.operator(
+            "bpy.ops.wm.url_open", text="Watch tutorial", icon="SEQUENCE"
+        )
+        op.url = "https://youtu.be/5JWf-B89msU?si=Nt8t7JwvngNI3bN9"
+
         layout.operator(FinalUnsubdivide.bl_idname, text="Unsubdivide")
 
 
@@ -374,6 +380,10 @@ class VIEW3D_PT_final_topology_editmode(Panel):
 
     def draw(self, context):
         layout = self.layout
+        op = layout.operator(
+            "bpy.ops.wm.url_open", text="Watch tutorial", icon="SEQUENCE"
+        )
+        op.url = "https://youtu.be/5JWf-B89msU?si=Nt8t7JwvngNI3bN9"
 
 
 def slide_menu_func(self, context):

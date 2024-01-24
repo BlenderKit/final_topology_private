@@ -238,6 +238,7 @@ def create_circle(center, normal, radius, num_verts):
     # Generate circle vertices
     angle_step = 2 * pi / num_verts
     circle_verts = []
+    print("creating circle")
     for i in range(num_verts):
         angle = i * angle_step
         x = cos(angle) * radius
@@ -245,5 +246,8 @@ def create_circle(center, normal, radius, num_verts):
         vert_local = Vector((x, y, 0))
         vert_world = transform_matrix @ vert_local
         circle_verts.append(vert_world)
+        if len(circle_verts) > 1:
+            print("adding line")
+            draw.add_line(circle_verts[-1], circle_verts[-2], (0, 1, 0, 1))
 
     return circle_verts
