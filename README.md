@@ -15,7 +15,9 @@ Enhanced version adds extra tools for professional CAD and automotive industry m
 - **Shape Freeze** - Enables to change topology of Subdivision surface model while keeping the resulting shape as same as possible. (TODO)
 
 ##Advanced version features:
-- **Constraints** - Edit mode constraints that work together with the subdivision surface snapping. By now snapping to plane. Main difference compared to various shrinwrap modifier tricks is that all constraints get evaluated in a loop together with the subdivision surface snapping, so all conditions get optimized.
+- **Constraints** - Edit mode constraints that work together with the subdivision surface snapping.  Main difference compared to various shrinkwrap modifier tricks is that all constraints get evaluated in a loop together with the subdivision surface snapping, so all conditions get optimized.
+  - **Plane constraint** snaps verts to a plane, has a fixed version where user can specify coordinates.
+  - **Curve constraint** - Experimental constraint that allows to snap to curve during the loop, including inverse subdivision functionality.
 - **Loop align to normal plane** - takes a loop and aligns it to a plane that is aligned with it's normals directions. 
 - **Loop slide optimize** - balances angles that there are between edges of a loop
 - **Flatten selection** - simple flatten to median plane operator (Similar to looptools)
