@@ -251,3 +251,174 @@ def create_circle(center, normal, radius, num_verts):
             draw.add_line(circle_verts[-1], circle_verts[-2], (0, 1, 0, 1))
 
     return circle_verts
+
+
+
+def move_verts_to_targets(bmesh_edit, target_offsets, weight=1.0):
+    """Move vertices to target positions, using a dictionary of target positions"""
+    for v_index in target_offsets.keys():
+        v = bmesh_edit.verts[v_index]
+        # v.co = v.colerp(target_offsets[v_index], weight)
+        v.co += target_offsets[v_index] * weight
+
+
+def get_verts_near_plane(bm, center, normal, distance):
+    """Return vertices near a plane defined by a center point and a normal vector"""
+    verts_near_plane = []
+    for vert in bm.verts:
+        if (vert.co - center).dot(normal) < distance:
+            verts_near_plane.append(vert)
+    return verts_near_plane
+
+
+
+def flatten_verts_calculate(
+    verts, method="best_fit", slide=False, center=None, normal=None
+):
+    """Calculate new positions for vertices to be flattened, Return a dictionary with the new positions"""
+    target_offsets = {}
+    # Estimate the best fit plane
+    if center is None or normal is None:
+        center, normal = estimate_best_fit_plane(verts, method)
+    else:
+        # normalize normal, user might edit it
+        normal = normal.normalized()
+
+    # Define a function to get the intersection point of a line with the plane
+    def line_plane_intersection(line_start, line_end, plane_point, plane_normal):
+        line_dir = line_end - line_start
+        d = (plane_point - line_start).dot(plane_normal) / line_dir.dot(plane_normal)
+        return line_start + d * line_dir
+
+    if slide:
+        for vert in verts:
+            # For each vertex, find the closest edge intersection with the plane
+            closest_intersection = None
+            min_distance = float("inf")
+            mean_intersection = Vector((0, 0, 0))
+            end_vertex = False
+            edges_selected = 0
+            for edge in vert.link_edges:
+                if edge.select:
+                    edges_selected += 1
+            if edges_selected == 1:
+                end_vertex = True
+
+            edges_included = 0
+
+            for edge in vert.link_edges:
+                if edge.select:
+                    continue
+
+                # find out if edge has shared face with a selected edge
+                if end_vertex:
+                    shared_face = False
+                    for face in edge.link_faces:
+                        for edge2 in face.edges:
+                            if edge2.select:
+                                shared_face = True
+                    if shared_face is False:
+                        continue
+
+                other_vert = edge.other_vert(vert)
+                intersection = line_plane_intersection(
+                    vert.co, other_vert.co, center, normal
+                )
+                distance = (vert.co - intersection).length
+                if distance < min_distance:
+                    min_distance = distance
+                    closest_intersection = intersection
+                mean_intersection += intersection
+                edges_included += 1
+
+            mean_intersection /= edges_included
+            if mean_intersection.length > 0:
+                add_target_offset(
+                    target_offsets, vert.index, mean_intersection - vert.co
+                )
+            # if closest_intersection:
+            #     vert.co = closest_intersection
+    else:
+        # Project the vertices onto the plane
+        for vert in verts:
+            # print(vert)
+            to_center = center - vert.co
+            distance_to_plane = to_center.dot(normal)
+            add_target_offset(target_offsets, vert.index, distance_to_plane * normal)
+    return target_offsets
+
+
+def flatten_verts(verts, method="best_fit", slide=False, center=None, normal=None):
+    # Estimate the best fit plane
+    target_offsets = flatten_verts_calculate(verts, method, slide, center, normal)
+    # Move the vertices to the new positions
+    for vert in verts:
+        vert.co = target_offsets[vert.index]
+
+def get_mirror_data(object):
+    mirror_modifiers = [mod for mod in object.modifiers if mod.type == "MIRROR"]
+    mirror_data = []
+    for m in mirror_modifiers:
+        if m.use_clip:
+            if m.mirror_object is not None:
+                # get the plane from the modifier
+                plane_co = m.mirror_object.matrix_world.translation
+                plane_no = m.mirror_object.matrix_world.to_3x3() @ m.use_axis
+                # convert to local space
+                plane_co = object.matrix_world.inverted() @ plane_co
+                plane_no = object.matrix_world.inverted().to_3x3() @ plane_no
+            else:
+                plane_co = Vector((0, 0, 0))
+
+            # get the mirrored planes from the modifier
+            mirror_planes = []
+            if m.use_axis[0]:
+                mirror_data.append((plane_co, Vector((1, 0, 0)), m.merge_threshold))
+            if m.use_axis[1]:
+                mirror_data.append((plane_co, Vector((0, 1, 0)), m.merge_threshold))
+            if m.use_axis[2]:
+                mirror_data.append((plane_co, Vector((0, 0, 1)), m.merge_threshold))
+    return mirror_data
+
+#TODO: Test mirror and if it works as is, remove this one.
+# it seems to not work that well, since it's not directly part of the inverse subdivide algo.
+def evaluate_mirror_constraints(object, bmesh_edit=None, bmesh_eval=None):
+    # Mirror modifier support
+    # This should work now same as fixed plane constraint, except that it gets the planes from the modifier.
+    mirror_modifiers = [mod for mod in object.modifiers if mod.type == "MIRROR"]
+    for m in mirror_modifiers:
+        if m.use_clip:
+            if m.mirror_object is not None:
+                # get the plane from the modifier
+                plane_co = m.mirror_object.matrix_world.translation
+                plane_no = m.mirror_object.matrix_world.to_3x3() @ m.use_axis
+                # convert to local space
+                plane_co = object.matrix_world.inverted() @ plane_co
+                plane_no = object.matrix_world.inverted().to_3x3() @ plane_no
+            else:
+                plane_co = Vector((0, 0, 0))
+
+            # get the mirrored planes from the modifier
+            mirror_planes = []
+            if m.use_axis[0]:
+                mirror_planes.append(Vector((1, 0, 0)))
+            if m.use_axis[1]:
+                mirror_planes.append(Vector((0, 1, 0)))
+            if m.use_axis[2]:
+                mirror_planes.append(Vector((0, 0, 1)))
+            for mirror_plane in mirror_planes:
+                verts = get_verts_near_plane(bmesh_edit, plane_co, mirror_plane,m.merge_threshold)
+                target_offsets = flatten_verts_calculate(
+                    verts,
+                    slide=False,
+                    method="fixed",
+                    center=plane_co,
+                    normal=mirror_plane,
+                )
+                move_verts_to_targets(bmesh_edit, target_offsets, weight=0.5)
+
+def add_target_offset(target_offsets, index, co):
+    """Add a new target position for a vertex to the dictionary"""
+    # tp = target_offsets.get(index, [])
+    # tp.append(co)
+    target_offsets[index] = co

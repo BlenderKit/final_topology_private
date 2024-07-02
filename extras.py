@@ -122,98 +122,7 @@ class NormalLoopAlign(Operator):
             use_proportional_edit=False,
         )
         return {"FINISHED"}
-
-
-def add_target_offset(target_offsets, index, co):
-    """Add a new target position for a vertex to the dictionary"""
-    # tp = target_offsets.get(index, [])
-    # tp.append(co)
-    target_offsets[index] = co
-
-
-def flatten_verts_calculate(
-    verts, method="best_fit", slide=False, center=None, normal=None
-):
-    """Calculate new positions for vertices to be flattened, Return a dictionary with the new positions"""
-    target_offsets = {}
-    # Estimate the best fit plane
-    if center is None or normal is None:
-        center, normal = estimate_best_fit_plane(verts, method)
-    else:
-        # normalize normal, user might edit it
-        normal = normal.normalized()
-
-    # Define a function to get the intersection point of a line with the plane
-    def line_plane_intersection(line_start, line_end, plane_point, plane_normal):
-        line_dir = line_end - line_start
-        d = (plane_point - line_start).dot(plane_normal) / line_dir.dot(plane_normal)
-        return line_start + d * line_dir
-
-    if slide:
-        for vert in verts:
-            # For each vertex, find the closest edge intersection with the plane
-            closest_intersection = None
-            min_distance = float("inf")
-            mean_intersection = Vector((0, 0, 0))
-            end_vertex = False
-            edges_selected = 0
-            for edge in vert.link_edges:
-                if edge.select:
-                    edges_selected += 1
-            if edges_selected == 1:
-                end_vertex = True
-
-            edges_included = 0
-
-            for edge in vert.link_edges:
-                if edge.select:
-                    continue
-
-                # find out if edge has shared face with a selected edge
-                if end_vertex:
-                    shared_face = False
-                    for face in edge.link_faces:
-                        for edge2 in face.edges:
-                            if edge2.select:
-                                shared_face = True
-                    if shared_face is False:
-                        continue
-
-                other_vert = edge.other_vert(vert)
-                intersection = line_plane_intersection(
-                    vert.co, other_vert.co, center, normal
-                )
-                distance = (vert.co - intersection).length
-                if distance < min_distance:
-                    min_distance = distance
-                    closest_intersection = intersection
-                mean_intersection += intersection
-                edges_included += 1
-
-            mean_intersection /= edges_included
-            if mean_intersection.length > 0:
-                add_target_offset(
-                    target_offsets, vert.index, mean_intersection - vert.co
-                )
-            # if closest_intersection:
-            #     vert.co = closest_intersection
-    else:
-        # Project the vertices onto the plane
-        for vert in verts:
-            # print(vert)
-            to_center = center - vert.co
-            distance_to_plane = to_center.dot(normal)
-            add_target_offset(target_offsets, vert.index, distance_to_plane * normal)
-    return target_offsets
-
-
-def flatten_verts(verts, method="best_fit", slide=False, center=None, normal=None):
-    # Estimate the best fit plane
-    target_offsets = flatten_verts_calculate(verts, method, slide, center, normal)
-    # Move the vertices to the new positions
-    for vert in verts:
-        vert.co = target_offsets[vert.index]
-
+ 
 
 def project_point_to_plane(point, plane_center, plane_normal):
     """Project a point onto a plane and return the projected point"""
@@ -524,7 +433,7 @@ class FlattenSelectionOperator(Operator):
         # Get the selected vertices
         selected_verts = [v for v in bm.verts if v.select]
 
-        flatten_verts(selected_verts, self.method, self.slide)
+        utils.flatten_verts(selected_verts, self.method, self.slide)
 
         bmesh.update_edit_mesh(obj.data)
 
@@ -902,12 +811,6 @@ def set_selected_vertices(object, bm, verts):
 from mesh_looptools import *
 
 
-def move_verts_to_targets(bmesh_edit, target_offsets, weight=1.0):
-    """Move vertices to target positions, using a dictionary of target positions"""
-    for v_index in target_offsets.keys():
-        v = bmesh_edit.verts[v_index]
-        # v.co = v.colerp(target_offsets[v_index], weight)
-        v.co += target_offsets[v_index] * weight
 
 
 constraints_cache = []
@@ -1022,6 +925,7 @@ def evaluate_constraints(object, bmesh_edit=None, bmesh_eval=None):
     check_constraints_cache(object)
     cs = object.data.ft_custom_constraints
     target_offsets_all = []
+
     for i, c in enumerate(cs):
         # skip disabled constraints
         if not c.enabled:
@@ -1044,13 +948,13 @@ def evaluate_constraints(object, bmesh_edit=None, bmesh_eval=None):
         # evaluate plane constraint
         if c.constraint_type == "PLANE":
             if len(constraint_verts_loop[0]) > 2:
-                target_offsets = flatten_verts_calculate(
+                target_offsets = utils.flatten_verts_calculate(
                     constraint_verts_loop[0], slide=False, method="best_fit"
                 )
         # evaluate fixed plane constraint
         elif c.constraint_type == "PLANE_FIXED":
             if len(constraint_verts_loop[0]) > 2:
-                target_offsets = flatten_verts_calculate(
+                target_offsets = utils.flatten_verts_calculate(
                     constraint_verts_loop[0],
                     slide=False,
                     method="fixed",
@@ -1058,7 +962,6 @@ def evaluate_constraints(object, bmesh_edit=None, bmesh_eval=None):
                     normal=Vector(c.normal),
                 )
             world_matrix = object.matrix_world
-            utils.create_circle(world_matrix @ Vector(c.center), c.normal, 0.1, 20)
 
         # evaluate curve constraint
         elif c.constraint_type == "CURVE":
@@ -1086,7 +989,7 @@ def evaluate_constraints(object, bmesh_edit=None, bmesh_eval=None):
                     (1, 0, 0, 1),
                     scale=1,
                 )
-        move_verts_to_targets(bmesh_edit, target_offsets, weight=0.1)
+        utils.move_verts_to_targets(bmesh_edit, target_offsets, weight=0.1)
 
     return bmesh_edit
 

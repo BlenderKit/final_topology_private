@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Final Topology - Inverse subdivide",
     "author": "Vilem Duha, BlenderKit",
-    "version": (1, 1),
+    "version": (1, 2),
     "blender": (4, 0, 0),
     "location": "View3D > Sidebar > Edit > Final Topology",
     "description": "Professional subdivision modelling tools, simply magic.",
@@ -15,7 +15,6 @@ from importlib import reload
 
 has_extras = True
 if "bpy" in locals():
-    extras = reload(extras)
     try:
         extras = reload(extras)
     except Exception as e:
@@ -28,15 +27,12 @@ if "bpy" in locals():
 else:
     from .inverse_subdivide import *
 
-    from . import extras
-
     try:
         from . import extras
         from .extras import *
     except Exception as e:
         has_extras = False
         print(e)
-
     from . import inverse_subdivide
     from . import draw
     from . import utils
@@ -187,6 +183,15 @@ class InverseSubdivideAddonPreferences(AddonPreferences):
         description="Snap to",
     )
 
+    offset_weight: FloatProperty(
+        name="Offset Weight",
+        default=0.2,
+        min=0.1,
+        max=1,
+        description="Weight of the inverse subdivision.\n\n"
+        "Lower values go slower to result, but prevent jiggle.",
+    )
+
     weight_algorithm: EnumProperty(
         name="Weight Algorithm",
         items=[
@@ -213,6 +218,11 @@ class InverseSubdivideAddonPreferences(AddonPreferences):
         "how much weight do the midpoints get.",
     )
 
+    use_mirror: BoolProperty(
+        name="Use Mirror",
+        default=True,
+        description="Use mirror modifier when evaluating",
+    )
 
 def inverse_subdivide_UI_draw(self, context):
     # Draw UI elements
@@ -282,7 +292,8 @@ def inverse_subdivide_UI_draw(self, context):
     layout.prop(user_preferences, "max_distance")
     if has_extras:
         layout.prop(user_preferences, "weight_algorithm")
-
+    layout.prop(user_preferences, "use_mirror")
+    layout.prop(user_preferences, "offset_weight")
 
 class VIEW3D_PT_final_topology_overlays(Panel):
     bl_category = "Edit"
@@ -357,10 +368,8 @@ class VIEW3D_PT_final_topology_objectmode(Panel):
 
     def draw(self, context):
         layout = self.layout
-        layout.operator()
-        op = layout.operator(
-            "bpy.ops.wm.url_open", text="Watch tutorial", icon="SEQUENCE"
-        )
+
+        op = layout.operator("wm.url_open", text="Watch tutorial", icon="SEQUENCE")
         op.url = "https://youtu.be/5JWf-B89msU?si=Nt8t7JwvngNI3bN9"
 
         layout.operator(FinalUnsubdivide.bl_idname, text="Unsubdivide")
@@ -380,9 +389,7 @@ class VIEW3D_PT_final_topology_editmode(Panel):
 
     def draw(self, context):
         layout = self.layout
-        op = layout.operator(
-            "bpy.ops.wm.url_open", text="Watch tutorial", icon="SEQUENCE"
-        )
+        op = layout.operator("wm.url_open", text="Watch tutorial", icon="SEQUENCE")
         op.url = "https://youtu.be/5JWf-B89msU?si=Nt8t7JwvngNI3bN9"
 
 

@@ -346,6 +346,11 @@ def calculate_offset(
     return offset
 
 
+
+
+
+
+
 def final_topology_optimization_step(self, context, iterations=1, neighbours=1):
     """Runs all optimization steps:
     - inverse subdivide
@@ -414,12 +419,17 @@ def final_topology_optimization_step(self, context, iterations=1, neighbours=1):
             depsgraph = bpy.context.evaluated_depsgraph_get()
             bm_eval = utils.get_evaluated_bm(self.object, depsgraph)
 
+        # apply mirror constraints
+        if user_preferences.use_mirror:
+            #utils.evaluate_mirror_constraints(self.object, bm_edit, bm_eval)
+            mirror_data = utils.get_mirror_data(self.object)
         if has_extras:
             bm_edit.verts.ensure_lookup_table()
 
             bm_edit = extras.evaluate_constraints(
                 self.object, bmesh_edit=bm_edit, bmesh_eval=bm_eval
             )
+
         bm_edit = bmesh.from_edit_mesh(me)
 
         # we need to ray-cast every iteration.
@@ -451,6 +461,9 @@ def final_topology_optimization_step(self, context, iterations=1, neighbours=1):
 
             # align offset with vert normal.
             if offset.length > 0:
+                # weight the offset down, to prevent instabilities.
+                offset*=user_preferences.offset_weight
+                
                 if v.normal.angle(offset) > radians(90):
                     # if the offset is in the opposite direction of the normal,
                     # we need to invert it to go along with the original offset
@@ -458,7 +471,20 @@ def final_topology_optimization_step(self, context, iterations=1, neighbours=1):
                 else:
                     v_normal_offset = v.normal * offset.length
 
-                v.co += v_normal_offset
+                #check if vert is close to some of the mirror planes, and if so, snap the offset to the mirror plane
+                if user_preferences.use_mirror:
+                    for mirror_center, mirror_normal, merge_distance in mirror_data:
+                        if (v.co - mirror_center).dot(mirror_normal) < merge_distance:
+                            #vertex is close to mirror plane
+                            v.co += v_normal_offset
+                            to_center = mirror_center - v.co
+                            distance_to_plane = to_center.dot(mirror_normal)
+                            v.co += distance_to_plane * mirror_normal
+                        else:
+                            #vertex is not close to mirror plane
+                            v.co += v_normal_offset
+                else:                    
+                    v.co += v_normal_offset
 
         bmesh.update_edit_mesh(me)
     return True
