@@ -12,13 +12,3 @@ website = "https://github.com/BlenderKit/final_topology"
 copyright = [
     "2023 Vilem Duha",
 ]
-
-[build]
-paths_exclude_pattern = [
-  "__pycache__/",
-  ".*",
-  "*.zip",
-  "out",
-  "README.md",
-  "DEVELOPING.md",
-]
