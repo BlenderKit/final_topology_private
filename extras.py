@@ -808,11 +808,6 @@ def set_selected_vertices(object, bm, verts):
         v.select = True
 
 
-from mesh_looptools import *
-
-
-
-
 constraints_cache = []
 
 # def compare_constraints(object):
