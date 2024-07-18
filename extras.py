@@ -37,68 +37,6 @@ def kd_tree_from_bmesh(bm):
     return kd
 
 
-def estimate_best_fit_plane(verts, method="best_fit"):
-    """
-    Estimate the best fit plane for a given set of vertices.
-
-    Parameters:
-    - verts: A list of bmesh vertices.
-    - method: A string that determines the method to compute the plane's orientation.
-              "best_fit" (default) computes the best fit plane.
-              "mean_normal" computes the plane's orientation based on the mean normal of the vertices.
-
-    Returns:
-    - A tuple containing the center of the plane and the plane's normal.
-    """
-
-    # Calculate the center of the vertices
-    center = Vector((0, 0, 0))
-    for vert in verts:
-        center += vert.co
-    center /= len(verts)
-
-    if method == "best_fit":
-        # Calculate the covariance matrix
-        cov_matrix = [[0, 0, 0], [0, 0, 0], [0, 0, 0]]
-        for vert in verts:
-            p = vert.co - center
-            for i in range(3):
-                for j in range(3):
-                    cov_matrix[i][j] += p[i] * p[j]
-
-        # Compute the normal of the plane using the eigenvector corresponding to the smallest eigenvalue
-        from numpy import linalg
-
-        _, eigenvectors = linalg.eigh(cov_matrix)
-        normal = Vector(eigenvectors[:, 0])
-
-    elif method == "mean_normal":
-        # Calculate the mean normal of the vertices
-        # normal = Vector((0, 0, 0))
-        # for vert in verts:
-        #     normal += vert.normal
-        # normal.normalize()
-
-        cov_matrix = [[0, 0, 0], [0, 0, 0], [0, 0, 0]]
-        for vert in verts:
-            # p = vert.co - center
-            # for i in range(3):
-            #     for j in range(3):
-            #         cov_matrix[i][j] += p[i] * p[j]
-            p = vert.co + vert.normal - center
-            for i in range(3):
-                for j in range(3):
-                    cov_matrix[i][j] += p[i] * p[j]
-
-        # Compute the normal of the plane using the eigenvector corresponding to the smallest eigenvalue
-        from numpy import linalg
-
-        _, eigenvectors = linalg.eigh(cov_matrix)
-        normal = Vector(eigenvectors[:, 0])
-
-    return center, normal
-
-
 class NormalLoopAlign(Operator):
     bl_idname = "mesh.flatten_loop_normal"
     bl_label = "Loop to normal-plane"
@@ -122,7 +60,7 @@ class NormalLoopAlign(Operator):
             use_proportional_edit=False,
         )
         return {"FINISHED"}
- 
+
 
 def project_point_to_plane(point, plane_center, plane_normal):
     """Project a point onto a plane and return the projected point"""
@@ -1420,12 +1358,12 @@ class AddConstraintOperator(bpy.types.Operator):
         if self.constraint_type == "PLANE_FIXED" or self.constraint_type == "PLANE":
             # get fixed plane from selection for constraints
 
-            center, normal = estimate_best_fit_plane(selected_verts, "best_fit")
+            center, normal = utils.estimate_best_fit_plane(selected_verts, "best_fit")
             new_constraint.center = center
             new_constraint.normal = normal
         if self.constraint_type == "CURVE":
             # get fixed plane from selection for constraints
-            center, normal = estimate_best_fit_plane(selected_verts, "best_fit")
+            center, normal = utils.estimate_best_fit_plane(selected_verts, "best_fit")
             new_constraint.center = center
             new_constraint.normal = normal
         attribute_name = fill_attribute_with_selection(

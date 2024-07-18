@@ -272,6 +272,68 @@ def get_verts_near_plane(bm, center, normal, distance):
 
 
 
+def estimate_best_fit_plane(verts, method="best_fit"):
+    """
+    Estimate the best fit plane for a given set of vertices.
+
+    Parameters:
+    - verts: A list of bmesh vertices.
+    - method: A string that determines the method to compute the plane's orientation.
+              "best_fit" (default) computes the best fit plane.
+              "mean_normal" computes the plane's orientation based on the mean normal of the vertices.
+
+    Returns:
+    - A tuple containing the center of the plane and the plane's normal.
+    """
+
+    # Calculate the center of the vertices
+    center = Vector((0, 0, 0))
+    for vert in verts:
+        center += vert.co
+    center /= len(verts)
+
+    if method == "best_fit":
+        # Calculate the covariance matrix
+        cov_matrix = [[0, 0, 0], [0, 0, 0], [0, 0, 0]]
+        for vert in verts:
+            p = vert.co - center
+            for i in range(3):
+                for j in range(3):
+                    cov_matrix[i][j] += p[i] * p[j]
+
+        # Compute the normal of the plane using the eigenvector corresponding to the smallest eigenvalue
+        from numpy import linalg
+
+        _, eigenvectors = linalg.eigh(cov_matrix)
+        normal = Vector(eigenvectors[:, 0])
+
+    elif method == "mean_normal":
+        # Calculate the mean normal of the vertices
+        # normal = Vector((0, 0, 0))
+        # for vert in verts:
+        #     normal += vert.normal
+        # normal.normalize()
+
+        cov_matrix = [[0, 0, 0], [0, 0, 0], [0, 0, 0]]
+        for vert in verts:
+            # p = vert.co - center
+            # for i in range(3):
+            #     for j in range(3):
+            #         cov_matrix[i][j] += p[i] * p[j]
+            p = vert.co + vert.normal - center
+            for i in range(3):
+                for j in range(3):
+                    cov_matrix[i][j] += p[i] * p[j]
+
+        # Compute the normal of the plane using the eigenvector corresponding to the smallest eigenvalue
+        from numpy import linalg
+
+        _, eigenvectors = linalg.eigh(cov_matrix)
+        normal = Vector(eigenvectors[:, 0])
+
+    return center, normal
+
+
 def flatten_verts_calculate(
     verts, method="best_fit", slide=False, center=None, normal=None
 ):
