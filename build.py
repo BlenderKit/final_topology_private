@@ -1,8 +1,8 @@
 import argparse
 import os
 import shutil
+import toml
 
-ADDON_NAME = "final_topology"
 OUT_DIR = "out"
 IGNORE_PATTERNS = [
     os.path.basename(__file__), # do not include this file
@@ -12,22 +12,40 @@ IGNORE_PATTERNS = [
     ".DS_Store",
 ]
 
+def pro_changes(workdir: str):
+    manifest = os.path.join(workdir, "blender_manifest.toml")
+    with open(manifest, "r") as file:
+        data = toml.load(file)
 
-def do_build(install_at):
-    print(f"Building {ADDON_NAME} addon...")
+    data["id"] = "final_topology_pro"
+    with open(manifest, "w") as file:
+        toml.dump(data, file)
+
+
+def do_build(install_at: str, pro_variant: str):
+    if pro_variant:
+        addon_name = "final_topology_pro"
+    else:
+        addon_name = "final_topology"
+        IGNORE_PATTERNS.append("extras.py")
+
+    print(f"Building {addon_name} addon...")
     src_dir = os.path.abspath(".")
     out_dir = os.path.abspath(OUT_DIR)
-    addon_build_dir = os.path.join(out_dir, ADDON_NAME)
+    addon_build_dir = os.path.join(out_dir, addon_name)
     shutil.rmtree(out_dir, ignore_errors=True)
     
     print("- copying files...")
-    shutil.copytree( src_dir, addon_build_dir, ignore=shutil.ignore_patterns(*IGNORE_PATTERNS))
+    shutil.copytree(src_dir, addon_build_dir, ignore=shutil.ignore_patterns(*IGNORE_PATTERNS))
+
+    if pro_variant:
+        pro_changes(addon_build_dir)
 
     print("- creating archive...")
-    shutil.make_archive(addon_build_dir, "zip", out_dir, ADDON_NAME)
+    shutil.make_archive(addon_build_dir, "zip", out_dir, addon_name)
     
     if install_at is not None:
-        install_at = os.path.join(install_at, ADDON_NAME)
+        install_at = os.path.join(install_at, addon_name)
         print(f"- copying to {install_at}...")
         shutil.rmtree(install_at, ignore_errors=True)
         shutil.copytree(addon_build_dir, install_at)
@@ -43,5 +61,10 @@ if __name__ == "__main__":
         default=None,
         help="If path is specified, then builded addon will be also copied to that location.",
     )
+    parser.add_argument(
+        "--pro",
+        action='store_true',
+        help="Set to True to build 'for CAD professionals' variant of the add-on.",
+    )
     args = parser.parse_args()
-    do_build(args.install_at)
+    do_build(args.install_at, args.pro)
