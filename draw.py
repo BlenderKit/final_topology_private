@@ -70,7 +70,7 @@ def add_arrow(v1, v2, col, scale=3):
         return
     col = (round(col[0], 1), round(col[1], 1), round(col[2], 1), round(col[3], 1))
 
-    user_preferences = bpy.context.preferences.addons["final_topology"].preferences
+    user_preferences = bpy.context.preferences.addons[__package__].preferences
     if user_preferences.enable_draw_arrows is False:
         return
     arrow_length_fraction = 0.5
@@ -121,7 +121,7 @@ def add_face(bm_face, object, col):
     """
     global draw_faces
     global draw_faces_list
-    user_preferences = bpy.context.preferences.addons["final_topology"].preferences
+    user_preferences = bpy.context.preferences.addons[__package__].preferences
     if user_preferences.enable_draw_faces is False:
         return
 
@@ -179,7 +179,7 @@ def draw_callback_px_3d(self, context):
     gpu.state.blend_set("ALPHA")
     gpu.state.line_width_set(4.0)
 
-    user_preferences = bpy.context.preferences.addons["final_topology"].preferences
+    user_preferences = bpy.context.preferences.addons[__package__].preferences
     if user_preferences.enable_draw_arrows or user_preferences.enable_draw_constraints:
         # print('line sets', len(draw_lines))
         for col, lines in draw_lines.items():

@@ -295,7 +295,7 @@ def calculate_offset(
     """Calculate offset of vertices. takes the whole groups of vertices that are taken into account (by now middle of connecting edges).
     it calculates the offset with weights, where longer edges get higher weight than shorter
     """
-    user_preferences = bpy.context.preferences.addons["final_topology"].preferences
+    user_preferences = bpy.context.preferences.addons[__package__].preferences
 
     total_difference = Vector((0, 0, 0))
     results_counted = 0
@@ -347,10 +347,6 @@ def calculate_offset(
 
 
 
-
-
-
-
 def final_topology_optimization_step(self, context, iterations=1, neighbours=1):
     """Runs all optimization steps:
     - inverse subdivide
@@ -358,7 +354,7 @@ def final_topology_optimization_step(self, context, iterations=1, neighbours=1):
     (these should be the same after addon rewrite)
     """
     # bpy.context.view_layer.update()
-    user_preferences = bpy.context.preferences.addons["final_topology"].preferences
+    user_preferences = bpy.context.preferences.addons[__package__].preferences
     s_levels = get_subdivision_modifier_level(self.object)
     # Keep running, but do nothing
     if s_levels is None:
@@ -492,7 +488,7 @@ def final_topology_optimization_step(self, context, iterations=1, neighbours=1):
 
 def get_target_objects(self):
     # Define which objects to raycast against
-    user_preferences = bpy.context.preferences.addons["final_topology"].preferences
+    user_preferences = bpy.context.preferences.addons[__package__].preferences
 
     target_objects = []
     if user_preferences.use_object_or_collection == "COLLECTION":
@@ -543,7 +539,7 @@ class InverseSubdivideStep(Operator):
     warning_posted = BoolProperty(default=False)
 
     def execute(self, context):
-        user_preferences = bpy.context.preferences.addons["final_topology"].preferences
+        user_preferences = bpy.context.preferences.addons[__package__].preferences
 
         # check if there's subdivision modifier
         self.object = bpy.context.active_object
@@ -604,7 +600,7 @@ class InverseSubdivideModal(Operator):
         return {"PASS_THROUGH"}
 
     def modal(self, context, event):
-        user_preferences = bpy.context.preferences.addons["final_topology"].preferences
+        user_preferences = bpy.context.preferences.addons[__package__].preferences
 
         # check if there's subdivision modifier
 
@@ -638,7 +634,7 @@ class InverseSubdivideModal(Operator):
     def invoke(self, context, event):
         global running_operator
 
-        user_preferences = bpy.context.preferences.addons["final_topology"].preferences
+        user_preferences = bpy.context.preferences.addons[__package__].preferences
 
         # return if we are already running
         if running_operator is not None:
@@ -703,14 +699,14 @@ def create_freeze_mesh_object():
     m.levels = 5
     utils.activate_object(orig_ob)
     bpy.ops.object.mode_set(mode="EDIT")
-    prefs = bpy.context.preferences.addons["final_topology"].preferences
+    prefs = bpy.context.preferences.addons[__package__].preferences
     prefs.use_object_or_collection = "OBJECT"
     bpy.context.scene.inverse_subdivide_target_object = freeze_mesh_object
     return freeze_mesh_object
 
 
 def delete_frozen_mesh():
-    prefs = bpy.context.preferences.addons["final_topology"].preferences
+    prefs = bpy.context.preferences.addons[__package__].preferences
     # bpy.ops.object.mode_set(mode='OBJECT')
 
     # bpy.ops.object.select_all(action='DESELECT')

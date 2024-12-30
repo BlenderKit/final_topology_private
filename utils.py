@@ -122,7 +122,7 @@ def get_attribute_elements(
     object, bm, constraint, domain="POINT", as_domain="POINT", sorted=False
 ):
     # get all elements with attribute value 1.0, also add them to draw list
-    user_preferences = bpy.context.preferences.addons["final_topology"].preferences
+    user_preferences = bpy.context.preferences.addons[__package__].preferences
 
     # Return elements might not be the same as draw elements if as_domain is different than domain.
     return_elements = []
