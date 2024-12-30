@@ -33,8 +33,12 @@ def do_build(install_at: str, pro_variant: str):
     src_dir = os.path.abspath(".")
     out_dir = os.path.abspath(OUT_DIR)
     addon_build_dir = os.path.join(out_dir, addon_name)
-    shutil.rmtree(out_dir, ignore_errors=True)
-    
+    ### don't remove, just clean build files for the variant
+    # shutil.rmtree(out_dir, ignore_errors=True)
+    #check if the build directory exists, delete it if it does
+    if os.path.exists(addon_build_dir):
+        shutil.rmtree(addon_build_dir)
+        
     print("- copying files...")
     shutil.copytree(src_dir, addon_build_dir, ignore=shutil.ignore_patterns(*IGNORE_PATTERNS))
 
@@ -61,10 +65,13 @@ if __name__ == "__main__":
         default=None,
         help="If path is specified, then builded addon will be also copied to that location.",
     )
-    parser.add_argument(
-        "--pro",
-        action='store_true',
-        help="Set to True to build 'for CAD professionals' variant of the add-on.",
-    )
+    # parser.add_argument(
+    #     "--pro",
+    #     action='store_true',
+    #     help="Set to True to build 'for CAD professionals' variant of the add-on.",
+    # )
+
     args = parser.parse_args()
-    do_build(args.install_at, args.pro)
+    
+    do_build(args.install_at, "")
+    do_build(args.install_at, "pro")
