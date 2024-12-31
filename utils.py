@@ -118,6 +118,23 @@ def get_connected_selections(edge_keys):
     return loops
 
 
+def ensure_attribute(mesh, domain="POINT", attr_type="FLOAT", name=""):
+    if not name:
+        name = f"{domain}_{attr_type}_attr"
+    if name in mesh.attributes:
+        return mesh.attributes[name]
+    return mesh.attributes.new(name=name, type=attr_type, domain=domain)
+
+def zero_attribute(attribute_layer):
+    """Write zeros to a float or vector attribute layer"""
+    print(dir(attribute_layer))
+    if attribute_layer.data_type == "FLOAT":
+        for i in attribute_layer.data:
+            i.value = 0.0
+    elif attribute_layer.data_type == "FLOAT_VECTOR":
+        for i in attribute_layer.data:
+            i.vector = Vector((0.0, 0.0, 0.0))
+
 def get_attribute_elements(
     object, bm, constraint, domain="POINT", as_domain="POINT", sorted=False
 ):
