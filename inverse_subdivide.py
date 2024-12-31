@@ -6,7 +6,7 @@ import bmesh
 import bpy
 from bpy.props import BoolProperty, IntProperty
 from bpy.types import Operator
-from mathutils import Vector, Quaternion
+from mathutils import Vector
 
 from . import draw, utils
 
@@ -355,124 +355,6 @@ def calculate_offset(
         offset = total_difference / total_weight
     return offset
 
-def estimate_curvature(object, bm):
-    """
-    Estimates curvature of an edge based on the angles of the adjacent faces. In case of quads, the opposite edge is considered.
-    On a triangle, both agles are considered, and the weight depends on the length of them being projected on the edge.
-    The resulting curvature gets stored into an edge attribute called 'Edge Curvature'. 
-    On non-manifold edges, we calculate extrusion direction for extending the surface, 
-    and this direction is stored in the edge attribute 'Border Extrusion Direction'.
-    """
-    # get attributes
-    me = object.data
-    edge_curvature_attr = utils.ensure_attribute(me, domain="EDGE", attr_type="FLOAT", name="Edge Curvature")
-    extrude_direction_attr = utils.ensure_attribute(me, domain="EDGE", attr_type="FLOAT_VECTOR", name="Border Extrusion Direction")
-
-    #write zeros to the attrs
-    utils.zero_attribute(edge_curvature_attr)
-    utils.zero_attribute(extrude_direction_attr)
-
-    #need to get the attributes from bmesh
-    edge_curvature_attr = bm.edges.layers.float.get("Edge Curvature")
-    extrude_direction_attr = bm.edges.layers.float_vector.get("Border Extrusion Direction")
-    # bm = bmesh.new()
-    # bm.from_mesh(me)
-    bm.edges.ensure_lookup_table()
-    bm.verts.ensure_lookup_table()
-    bm.faces.ensure_lookup_table()
-
-    angles = []
-    curvatures = []
-    continue_directions = []
-    for e in bm.edges:
-        # get the angles of the faces adjacent to the edge
-        angles.append(e.calc_face_angle_signed(0))
-    
-    #Now let's go through edges again, find either opposite edge for quads or mix for other cases, and calculate the curvature
-    for e in bm.edges:
-        influencing_angles = [] # angles with their respective weights
-        total_length = 0
-
-        
-        for f in e.link_faces:
-            if len(f.verts) == 4:
-                # quad, find opposite edge
-                opposite_edge = None
-                edge_length = 0
-                link_edges = []
-                for v in e.verts:
-                    link_edges.extend(v.link_edges)
-                for e2 in f.edges:
-                    if e2 != e and e2 not in link_edges:
-                        opposite_edge = e2
-                    if e2 != e and e2 in link_edges:
-                        # distance between loops is used to 
-                        # calculate the weight of the angle
-                        # and get the direction of the extrusion on non-manifold edges
-                        edge_length += e.calc_length()
-                        if e2.verts[0] in e.verts:
-                            continue_direction=e2.verts[0].co - e2.verts[1].co
-                        else:
-                            continue_direction=e2.verts[1].co - e2.verts[0].co
-                edge_length /= 2
-                if opposite_edge is not None:
-                    edge_angle = angles[opposite_edge.index]
-                    influencing_angles.append((edge_angle, edge_length))
-                    total_length += edge_length
-            else:
-                # TODO this is nothing working yet!!!! Just quads for start
-                # triangle, calculate both angles
-                pass;
-
-        #add edges own angle for manifold edges that have 2 connected faces
-        if len(e.link_faces) == 2:
-            #weight is calculated from total length of the surrounding faces
-            weight = 0
-            if len(influencing_angles) > 0:
-                weight = total_length / len(influencing_angles)
-
-            influencing_angles.append((angles[e.index], weight))
-            total_length += weight
-
-        #calculate the curvature
-        curvature = 0
-        for edge_angle, edge_length in influencing_angles:
-            if total_length == 0:
-                curvature += edge_angle
-            else:
-                curvature += edge_angle * edge_length / total_length
-        curvatures.append(curvature)
-        # this would work in object mode?
-        # edge_curvature_attr.data[e.index].value = curvature
-        e[edge_curvature_attr] = curvature
-        # let's rotate the border extrusion direction by the curvature stored on the edge. 
-        # The edge is used as axis of rotation, and the curvature is the angle of rotation
-        # we need to get the order of the verts in the edge from the face loop, so it's correctly oriented.
-        # that's why this doesn't work, having rotation randomly in both directions:
-        
-        if len(e.link_faces)==1:
-            v1 = None
-            v1face_index = None
-            v2 = None
-            v2face_index = None
-            for i,v in enumerate(e.link_faces[0].verts):
-                if v in e.verts and v1 is None:
-                    v1 = v
-                    v1face_index = i
-                elif v in e.verts and v2 is None:
-                    v2 = v
-                    v2face_index = i
-            #get the direction of the extrusion
-            if v2face_index - v1face_index == 1:
-                rot_axis = v2.co - v1.co
-            else:
-                rot_axis = v1.co - v2.co
-
-            rot_quat = Quaternion(rot_axis, curvature)
-            rot_euler = rot_quat.to_euler()
-            continue_direction.rotate(rot_euler)
-
-            e[extrude_direction_attr] = continue_direction
 
 def final_topology_optimization_step(self, context, iterations=1, neighbours=1):
     """Runs all optimization steps:
@@ -507,7 +389,6 @@ def final_topology_optimization_step(self, context, iterations=1, neighbours=1):
         return False
     me = self.object.data
     bm_edit = bmesh.from_edit_mesh(me)
-    estimate_curvature(self.object, bm_edit)
 
     selected_verts = [v for v in bm_edit.verts if v.select]
     # neighbors are all vertices (selected and neighbors) of the edit mesh that can be tweaked.
