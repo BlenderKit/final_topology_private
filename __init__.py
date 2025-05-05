@@ -220,9 +220,10 @@ class InverseSubdivideAddonPreferences(AddonPreferences):
 
     use_mirror: BoolProperty(
         name="Use Mirror",
-        default=True,
+        default=False,
         description="Use mirror modifier when evaluating",
     )
+
 
 def inverse_subdivide_UI_draw(self, context):
     # Draw UI elements
@@ -294,6 +295,7 @@ def inverse_subdivide_UI_draw(self, context):
         layout.prop(user_preferences, "weight_algorithm")
     layout.prop(user_preferences, "use_mirror")
     layout.prop(user_preferences, "offset_weight")
+
 
 class VIEW3D_PT_final_topology_overlays(Panel):
     bl_category = "Edit"
