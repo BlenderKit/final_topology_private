@@ -1174,8 +1174,9 @@ class VIEW3D_PT_final_topology_extra_operators(Panel):
 
     def draw(self, context):
         layout = self.layout
-
-        layout.operator(FlattenSelectionOperator.bl_idname, text="Flatten Selection")
+        
+        # Hide flatten selection, seems broken by now.
+        # layout.operator(FlattenSelectionOperator.bl_idname, text="Flatten Selection")
         layout.operator(NormalLoopAlign.bl_idname, text="Loop Align to Normal Plane")
         layout.operator(SlideOptimizeOperator.bl_idname, text="Loop Slide Optimize")
 
