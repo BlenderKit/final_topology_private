@@ -414,9 +414,9 @@ def final_topology_optimization_step(self, context, iterations=1, neighbours=1):
             depsgraph = bpy.context.evaluated_depsgraph_get()
             bm_eval = utils.get_evaluated_bm(self.object, depsgraph)
 
+        mirror_data = None
         # apply mirror constraints
         if user_preferences.use_mirror:
-            mirror_data = None
             # check if there's a mirror modifier
             for mod in self.object.modifiers:
                 if mod.type == "MIRROR":
