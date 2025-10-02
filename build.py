@@ -22,27 +22,40 @@ def pro_changes(workdir: str):
         toml.dump(data, file)
 
 
-def do_build(install_at: str, pro_variant: str):
+def do_build(install_at: str, pro_variant: bool):
     if pro_variant:
         addon_name = "final_topology_pro"
+        ignore_patterns = IGNORE_PATTERNS.copy()
     else:
         addon_name = "final_topology"
-        IGNORE_PATTERNS.append("extras.py")
+        ignore_patterns = IGNORE_PATTERNS + ["extras.py"]
 
     print(f"Building {addon_name} addon...")
     src_dir = os.path.abspath(".")
     out_dir = os.path.abspath(OUT_DIR)
     addon_build_dir = os.path.join(out_dir, addon_name)
-    shutil.rmtree(out_dir, ignore_errors=True)
+    
+    # Read version from manifest
+    manifest_path = os.path.join(src_dir, "blender_manifest.toml")
+    with open(manifest_path, "r") as file:
+        manifest_data = toml.load(file)
+    version = manifest_data.get("version", "unknown")
     
     print("- copying files...")
-    shutil.copytree(src_dir, addon_build_dir, ignore=shutil.ignore_patterns(*IGNORE_PATTERNS))
+    shutil.copytree(src_dir, addon_build_dir, ignore=shutil.ignore_patterns(*ignore_patterns))
 
     if pro_variant:
         pro_changes(addon_build_dir)
 
     print("- creating archive...")
-    shutil.make_archive(addon_build_dir, "zip", out_dir, addon_name)
+    # Create zip filename with version and appropriate suffix
+    if pro_variant:
+        zip_name = f"final_topology_{version}"
+    else:
+        zip_name = f"final_topology_{version}_artists"
+    
+    zip_path = os.path.join(out_dir, zip_name)
+    shutil.make_archive(zip_path, "zip", out_dir, addon_name)
     
     if install_at is not None:
         install_at = os.path.join(install_at, addon_name)
@@ -50,7 +63,13 @@ def do_build(install_at: str, pro_variant: str):
         shutil.rmtree(install_at, ignore_errors=True)
         shutil.copytree(addon_build_dir, install_at)
 
-    print("Done.")
+    print(f"Done building {addon_name}.")
+
+
+def clean_output_dir():
+    out_dir = os.path.abspath(OUT_DIR)
+    print("Cleaning output directory...")
+    shutil.rmtree(out_dir, ignore_errors=True)
 
 
 if __name__ == "__main__":
@@ -66,5 +85,23 @@ if __name__ == "__main__":
         action='store_true',
         help="Set to True to build 'for CAD professionals' variant of the add-on.",
     )
+    parser.add_argument(
+        "--all",
+        action='store_true',
+        help="Build both regular and pro variants.",
+    )
     args = parser.parse_args()
-    do_build(args.install_at, args.pro)
+    
+    if args.all and args.pro:
+        print("Error: Cannot use --all and --pro together. Use either --all or --pro.")
+        exit(1)
+    
+    clean_output_dir()
+    
+    if args.all:
+        print("Building both variants...")
+        do_build(args.install_at, False)  # regular variant
+        do_build(args.install_at, True)   # pro variant
+        print("All builds completed.")
+    else:
+        do_build(args.install_at, args.pro)
