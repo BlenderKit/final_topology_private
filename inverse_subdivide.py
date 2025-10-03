@@ -218,7 +218,7 @@ def get_subdivision_modifier_level(obj):
 
 
 def process_vertex_raycast(
-    i, bm_eval, offset_verts_hit_positions, user_preferences, target_objects, obj
+    i, bm_eval, offset_verts_hit_positions, user_preferences, target_objects, obj, normal_offset = 0.0
 ):
     """
     Process a single vertex in the mesh to calculate its offset based on raycasting.
@@ -261,6 +261,9 @@ def process_vertex_raycast(
 
         # Calculate the difference vector
         difference = local_hit_position - res_v.co
+        # add the normal offset to the difference
+        if normal_offset != 0.0:
+            difference += normal_offset * res_v.normal
 
         # Add draw data
         l = difference.length / user_preferences.gradient_sensitivity_distance
@@ -352,7 +355,7 @@ def final_topology_optimization_step(self, context, iterations=1, neighbours=1):
     - constraints
     (these should be the same after addon rewrite)
     """
-    # bpy.context.view_layer.update()
+    # prepare for inverse subdivide operations
     user_preferences = bpy.context.preferences.addons[__package__].preferences
     s_levels = get_subdivision_modifier_level(self.object)
     # Keep running, but do nothing
@@ -423,13 +426,17 @@ def final_topology_optimization_step(self, context, iterations=1, neighbours=1):
                     mirror_data = utils.get_mirror_data(self.object)
                     break
         if has_extras:
+            # Evaluate constraints
+            # TODO: inverse subdivide step should become a constraint. 
+            # Same as other constraints, it needs a preparation step, 
+            # and then evaluation that happens in iterations.
             bm_edit.verts.ensure_lookup_table()
 
             bm_edit = extras.evaluate_constraints(
                 self.object, bmesh_edit=bm_edit, bmesh_eval=bm_eval
             )
-
-        bm_edit = bmesh.from_edit_mesh(me)
+        else:
+            bm_edit = bmesh.from_edit_mesh(me)
 
         # we need to ray-cast every iteration.
         offset_verts_hit_positions = {}
@@ -442,12 +449,14 @@ def final_topology_optimization_step(self, context, iterations=1, neighbours=1):
                 user_preferences,
                 target_objects,
                 self.object,
+                0.0
             )
 
         for v in neighbors:
             if offset_verts_indices.get(v.index) is None:
                 # TODO find out why sometimes the key isn't in the dict, otherwise this condition wouldn't be here.
                 continue
+            # calculate the offset for the vertex
             offset = calculate_offset(
                 bm_eval,
                 offset_verts_indices[v.index],
@@ -490,19 +499,21 @@ def final_topology_optimization_step(self, context, iterations=1, neighbours=1):
 
 
 def get_target_objects(self):
-    # Define which objects to raycast against
-    user_preferences = bpy.context.preferences.addons[__package__].preferences
+    active_obj = bpy.context.active_object
+    if not active_obj:
+        return []
 
     target_objects = []
-    if user_preferences.use_object_or_collection == "COLLECTION":
-        for ob in bpy.context.scene.inverse_subdivide_target_collection.objects:
-            if ob.type == "MESH" and ob.visible_get():
-                target_objects.append(ob)
-    elif user_preferences.use_object_or_collection == "OBJECT":
-        tob = bpy.context.scene.inverse_subdivide_target_object
+    if active_obj.final_topology.use_object_or_collection == "COLLECTION":
+        target_collection = active_obj.final_topology.target_collection
+        if target_collection:
+            for ob in target_collection.objects:
+                if ob.type == "MESH" and ob.visible_get():
+                    target_objects.append(ob)
+    elif active_obj.final_topology.use_object_or_collection == "OBJECT":
+        tob = active_obj.final_topology.target_object
         if tob is not None and tob.type == "MESH" and tob.hide_viewport is False:
             target_objects.append(tob)
-
     else:
         # get all visible objects for scene option
         target_objects = [
@@ -581,9 +592,11 @@ class InverseSubdivideModal(Operator):
 
     def handle_event(self, context, event, user_preferences):
         global running_operator
+        active_obj = context.active_object
 
         if (
-            user_preferences.enable_operator == False
+            not active_obj
+            or not active_obj.final_topology.enable_operator
             or running_operator is None
             or bpy.context.mode != "EDIT_MESH"
         ):
@@ -596,7 +609,8 @@ class InverseSubdivideModal(Operator):
             bpy.types.SpaceView3D.draw_handler_remove(self._2d_handle, "WINDOW")
             running_operator = None
             draw.clear_draw_list()
-            user_preferences.enable_operator = False
+            if active_obj:
+                active_obj.final_topology.enable_operator = False
             set_modifiers_end(self.object, self.modifiers_state_start)
             return {"CANCELLED"}
 
@@ -637,11 +651,12 @@ class InverseSubdivideModal(Operator):
     def invoke(self, context, event):
         global running_operator
 
-        user_preferences = bpy.context.preferences.addons[__package__].preferences
+        active_obj = context.active_object
+        if not active_obj:
+            return {"CANCELLED"}
 
-        # return if we are already running
         if running_operator is not None:
-            user_preferences.enable_operator = False
+            active_obj.final_topology.enable_operator = False
             running_operator = None
             return {"CANCELLED"}
 
@@ -657,20 +672,16 @@ class InverseSubdivideModal(Operator):
             draw.draw_callback_px_2d, args, "WINDOW", "POST_PIXEL"
         )
 
-        # if user_preferences.always_on and user_preferences.use_timer:
-        # We start timer always, but use it only when the setting is enabled
         wm = context.window_manager
-        self._timer = wm.event_timer_add(
-            0.3, window=context.window
-        )  # 1 second interval
+        self._timer = wm.event_timer_add(0.3, window=context.window)
 
         context.window_manager.modal_handler_add(self)
         # set running operator to be aware of it already running
         running_operator = self
         # enable this if user did run the operator e.g. from search menu
-        user_preferences.enable_operator = True
+        active_obj.final_topology.enable_operator = True
         self.warning_posted = False
-        self.object = bpy.context.active_object
+        self.object = active_obj
         self.modifiers_state_start = set_modifiers_start(self.object)
 
         return {"RUNNING_MODAL"}
@@ -702,21 +713,18 @@ def create_freeze_mesh_object():
     m.levels = 5
     utils.activate_object(orig_ob)
     bpy.ops.object.mode_set(mode="EDIT")
-    prefs = bpy.context.preferences.addons[__package__].preferences
-    prefs.use_object_or_collection = "OBJECT"
-    bpy.context.scene.inverse_subdivide_target_object = freeze_mesh_object
+    orig_ob.final_topology.use_object_or_collection = "OBJECT"
+    orig_ob.final_topology.target_object = freeze_mesh_object
     return freeze_mesh_object
 
 
 def delete_frozen_mesh():
-    prefs = bpy.context.preferences.addons[__package__].preferences
-    # bpy.ops.object.mode_set(mode='OBJECT')
-
-    # bpy.ops.object.select_all(action='DESELECT')
+    active_obj = bpy.context.active_object
     object = bpy.data.objects.get("FROZEN_MESH_STATE")
     if object is not None:
         bpy.data.objects.remove(object)
-    prefs.use_object_or_collection = "SCENE"
+    if active_obj:
+        active_obj.final_topology.use_object_or_collection = "SCENE"
 
 
 class FreezeShape(bpy.types.Operator):

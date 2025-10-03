@@ -657,10 +657,11 @@ class SlideOptimizeOperator(bpy.types.Operator):
 #
 #             bm_eval = get_evaluated_bm(obj, depsgraph)
 #
-#             if user_preferences.use_object_or_collection == "COLLECTION":
-#                 target_objects = bpy.context.scene.inverse_subdivide_target_collection.objects
+#             active_obj = bpy.context.active_object
+#             if active_obj.final_topology.use_object_or_collection == "COLLECTION":
+#                 target_objects = active_obj.final_topology.target_collection.objects
 #             else:
-#                 target_objects = [bpy.context.scene.inverse_subdivide_target_object]
+#                 target_objects = [active_obj.final_topology.target_object]
 #             level_subs_neighbours = 1 * 2 ** (get_subdivision_modifier_level(obj) - 1)
 #             for v in bm.verts:
 #                 offset = calculate_subdivide_offset(obj, target_objects, bm_eval, v, depsgraph, level_subs_neighbours)

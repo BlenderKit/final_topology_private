@@ -46,7 +46,31 @@ from bpy.props import (
     PointerProperty,
     StringProperty,
 )
-from bpy.types import AddonPreferences, Operator, Panel
+from bpy.types import AddonPreferences, Operator, Panel, PropertyGroup
+
+
+class FinalTopologyObjectProperties(PropertyGroup):
+    enable_operator: BoolProperty(
+        name="Inverse-Subsurf",
+        default=False,
+        description="Toggle to enable Inverse-Subsurf",
+    )
+
+    use_object_or_collection: EnumProperty(
+        name="Use Object or Collection",
+        items=[
+            ("SCENE", "Scene", "\nAll evaluated objects in scene"),
+            ("OBJECT", "Object", "\nSingle object"),
+            ("COLLECTION", "Collection", "\nCollection"),
+        ],
+        default="SCENE",
+        description="Snap to",
+    )
+
+    target_object: PointerProperty(type=bpy.types.Object, name="Target Object")
+    target_collection: PointerProperty(
+        type=bpy.types.Collection, name="Target Collection"
+    )
 
 
 class PopupDialog(bpy.types.Operator):
@@ -75,13 +99,6 @@ class PopupDialog(bpy.types.Operator):
 
 class InverseSubdivideAddonPreferences(AddonPreferences):
     bl_idname = __name__
-
-    enable_operator: BoolProperty(
-        name="Inverse-Subsurf",
-        default=False,
-        description="Toggle to enable Inverse-Subsurf",
-        # update=update_enable_operator
-    )
 
     always_on: BoolProperty(
         name="After each operation",
@@ -171,17 +188,6 @@ class InverseSubdivideAddonPreferences(AddonPreferences):
         max=1,
         description="Alpha of the overlays",
     )
-    # Enum property
-    use_object_or_collection: EnumProperty(
-        name="Use Object or Collection",
-        items=[
-            ("SCENE", "Scene", "\nAll evaluated objects in scene"),
-            ("OBJECT", "Object", "\nSingle object"),
-            ("COLLECTION", "Collection", "\nCollection"),
-        ],
-        default="SCENE",
-        description="Snap to",
-    )
 
     offset_weight: FloatProperty(
         name="Offset Weight",
@@ -226,11 +232,11 @@ class InverseSubdivideAddonPreferences(AddonPreferences):
 
 
 def inverse_subdivide_UI_draw(self, context):
-    # Draw UI elements
     if not poll_inverse_subdivide(self, context):
         return
 
     user_preferences = bpy.context.preferences.addons[__name__].preferences
+    active_obj = bpy.context.active_object
     layout = self.layout
 
     layout.operator(
@@ -239,7 +245,7 @@ def inverse_subdivide_UI_draw(self, context):
         icon="TRACKING_FORWARDS_SINGLE",
     )
 
-    if user_preferences.enable_operator:
+    if active_obj.final_topology.enable_operator:
         layout.operator(
             InverseSubdivideModal.bl_idname,
             text="Inverse Subdsurf Modal",
@@ -275,16 +281,11 @@ def inverse_subdivide_UI_draw(self, context):
             FreezeShape.bl_idname, text="Freeze Shape", depress=False, icon="FREEZE"
         )
         row = layout.row()
-        row.prop(user_preferences, "use_object_or_collection", text="")
-        if user_preferences.use_object_or_collection == "OBJECT":
-            # Layout for target object selection using prop_search
-            row.prop(bpy.context.scene, "inverse_subdivide_target_object", text="")
-        elif user_preferences.use_object_or_collection == "COLLECTION":
-            # Layout for target collection selection using prop_search
-            row.prop(bpy.context.scene, "inverse_subdivide_target_collection", text="")
-        else:
-            # Scene option, no need to display anything
-            pass
+        row.prop(active_obj.final_topology, "use_object_or_collection", text="")
+        if active_obj.final_topology.use_object_or_collection == "OBJECT":
+            row.prop(active_obj.final_topology, "target_object", text="")
+        elif active_obj.final_topology.use_object_or_collection == "COLLECTION":
+            row.prop(active_obj.final_topology, "target_collection", text="")
 
     if has_extras:
         layout.separator()
@@ -416,16 +417,19 @@ def draw_inverse_subdivide_toggle(self, context):
     if not poll_inverse_subdivide(self, context):
         return
 
-    self.layout.prop(
-        context.preferences.addons[__name__].preferences,
-        "enable_operator",
-        toggle=True,
-        icon="MOD_SUBSURF",
-        text="",
-    )
+    active_obj = context.active_object
+    if active_obj:
+        self.layout.prop(
+            active_obj.final_topology,
+            "enable_operator",
+            toggle=True,
+            icon="MOD_SUBSURF",
+            text="",
+        )
 
 
 classes = [
+    FinalTopologyObjectProperties,
     InverseSubdivideModal,
     InverseSubdivideStep,
     FreezeShape,
@@ -445,22 +449,14 @@ def register():
     # Regsiter classes
     for cls in classes:
         bpy.utils.register_class(cls)
-    # Add UI elements
-    # bpy.types.VIEW3D_PT_snapping.append(inverse_subdivide_UI_draw)
-    bpy.types.Scene.inverse_subdivide_target_object = PointerProperty(
-        type=bpy.types.Object, name="Target Object"
-    )
-    bpy.types.Scene.inverse_subdivide_target_collection = PointerProperty(
-        type=bpy.types.Collection, name="Target Collection"
-    )
-    user_preferences = bpy.context.preferences.addons[__name__].preferences
-    user_preferences.enable_operator = False
+
+    bpy.types.Object.final_topology = PointerProperty(type=FinalTopologyObjectProperties)
+
     bpy.types.VIEW3D_MT_edit_mesh_edges.append(slide_menu_func)
-    # bpy.types.VIEW3D_HT_header.append(draw_inverse_subdivide_toggle)
 
     if has_extras:
         extras.register()
-    # Add shortcuts
+
     wm = bpy.context.window_manager
     km = wm.keyconfigs.addon.keymaps.new(name="Window", space_type="VIEW_3D")
 
@@ -490,10 +486,10 @@ def unregister():
     for cls in classes:
         bpy.utils.unregister_class(cls)
 
-    # Remove UI elements
-    # bpy.types.VIEW3D_PT_snapping.remove(inverse_subdivide_UI_draw)
+    del bpy.types.Object.final_topology
+
     bpy.types.VIEW3D_MT_edit_mesh_edges.remove(slide_menu_func)
-    # bpy.types.VIEW3D_HT_header.remove(draw_inverse_subdivide_toggle)
+
     if has_extras:
         extras.unregister()
 
