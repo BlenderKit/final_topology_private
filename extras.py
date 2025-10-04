@@ -140,6 +140,28 @@ def eval_point(co, curve_snapping="3D", source_curve=None):
         )
     return reference_co
 
+def calculate_curve_length(source_curve, curve_snapping):
+    # Calculate curve length from actual evaluated curve vertices
+
+    depsgraph = bpy.context.evaluated_depsgraph_get()
+    bmesh_curve = utils.get_evaluated_bm(source_curve, depsgraph)
+    curve_world_matrix = source_curve.matrix_world
+    curve_length = 0
+    for i in range(len(bmesh_curve.verts)):
+        if i == 0:
+            continue
+        start_co = eval_point(
+            curve_world_matrix @ bmesh_curve.verts[i - 1].co,
+            curve_snapping,
+            source_curve,
+        )
+        end_co = eval_point(
+            curve_world_matrix @ bmesh_curve.verts[i].co,
+            curve_snapping,
+            source_curve,
+        )
+        curve_length += (end_co - start_co).length
+    return curve_length
 
 def to_curve_verts_calculate(
     loop,
@@ -175,9 +197,12 @@ def to_curve_verts_calculate(
     # TODO MOVE THIS TO CACHE
     depsgraph = bpy.context.evaluated_depsgraph_get()
     bmesh_curve = utils.get_evaluated_bm(source_curve, depsgraph)
-    curve_length = (
-        source_curve.data.splines[0].calc_length() * source_curve.scale.x
-    )  # let's hope user at least scales uniformly :)
+    
+    #curve_length = calculate_curve_length(source_curve, curve_snapping)
+    # use blender's original function to calculate curve length
+    curve_length =  source_curve.data.splines[0].calc_length() * source_curve.scale.x
+
+    
     # calculate loop length
     loop_length = 0
     for i, vert in enumerate(loop[0]):
@@ -303,21 +328,20 @@ def to_curve_verts_calculate(
                     source_curve,
                 )
 
-                distance_would_be_traveled = (
-                    distance_traveled + (end_point - start_point).length
-                )
+                segment_length = (end_point - start_point).length
+                distance_would_be_traveled = distance_traveled + segment_length
+                
                 if distance_would_be_traveled >= target_distance:
                     # found the segment, let's interpolate
-                    ratio = (target_distance - distance_traveled) / (
-                        distance_would_be_traveled - distance_traveled
-                    )
+                    ratio = (target_distance - distance_traveled) / segment_length
                     co = start_point.lerp(end_point, ratio)
                     target_offsets[vert.index] = co - reference_co
-                    distance_traveled += (co - start_point).length
+                    distance_traveled = target_distance
                     start_point = co
-                    # last_index -= direction  # get one step back for possible more points and to compensate for the last step already done
-                    # target_offsets[vert.index] = end_point - reference_co
                     break
+                else:
+                    distance_traveled += segment_length
+                    start_point = end_point
 
         # Store the offset for each vertex
 
@@ -385,7 +409,7 @@ def edge_angle(e1, e2, face_normal):
     a.negate()
     axis = a.cross(c).normalized()
     if axis.length < 1e-5:
-        return pi  # inline vert
+        return pi
 
     if axis.dot(face_normal) < 0:
         axis.negate()
@@ -395,6 +419,115 @@ def edge_angle(e1, e2, face_normal):
     c = (M @ c).xy.normalized()
 
     return pi - atan2(a.cross(c), a.dot(c))
+
+
+def slide_optimize_calculate(loops_data):
+    """Calculate slide offsets for vertices to balance angles where quads meet
+    
+    Args:
+        loops_data: List of loops, each as [verts_list, is_circular]
+    """
+    target_offsets = {}
+    
+    # Process each loop separately
+    for loop_data in loops_data:
+        selected_verts = loop_data[0]
+        if len(selected_verts) == 0:
+            continue
+        
+        selected_verts_set = set(selected_verts)
+        selected_edges = []
+        for v in selected_verts:
+            for edge in v.link_edges:
+                if edge.other_vert(v) in selected_verts_set:
+                    selected_edges.append(edge)
+        
+        if len(selected_edges) == 0:
+            continue
+        
+        total_length = 0
+        for e in selected_edges:
+            total_length += e.calc_length()
+        avg_length = total_length / len(selected_edges)
+
+        # this is additional to the global weight settings, 
+        # because slide optimize can become very unstable soon.
+        
+        multiplier = 0.1 
+
+        for v1 in selected_verts:
+            slide_directions = []
+            slide_candidates_edges = []
+            sel_edges_count = 0
+            
+            for e in v1.link_edges:
+                slide_directions.append(0)
+                if e.other_vert(v1) not in selected_verts_set:
+                    continue
+                sel_edges_count += 1
+                slide_candidates_edges.append(e)
+            
+            if sel_edges_count != 2:
+                continue
+            if len(v1.link_edges) < 4:
+                continue
+            
+            tot_normal = v1.normal
+            a = edge_angle(
+                slide_candidates_edges[0], slide_candidates_edges[1], tot_normal
+            )
+            
+            for fi, f in enumerate(v1.link_faces):
+                for e1fi, e1 in enumerate(f.edges):
+                    if v1 not in e1.verts:
+                        continue
+                    
+                    e2 = f.edges[e1fi - 1]
+                    if v1 not in e2.verts:
+                        continue
+                    a = edge_angle(e2, e1, tot_normal)
+                    
+                    for e3i, e3 in enumerate(v1.link_edges):
+                        if e3 == e2 and e2.other_vert(v1) not in selected_verts_set:
+                            slide_directions[e3i] += a
+                        if e3 == e1 and e1.other_vert(v1) not in selected_verts_set:
+                            slide_directions[e3i] += a
+            
+            slide_candidates = []
+            for i, a in enumerate(slide_directions):
+                if a > 0:
+                    slide_candidates.append([i, a])
+            
+            if len(slide_candidates) != 2:
+                continue
+            
+            mina = 10000
+            minindex = -1
+            for c in slide_candidates:
+                if c[1] < mina:
+                    mina = c[1]
+                    minindex = c[0]
+            
+            for c in slide_candidates:
+                if c[0] != minindex:
+                    other_candidate_angle = c[1]
+                    other_edge = v1.link_edges[c[0]]
+            
+            slide_edge = v1.link_edges[minindex]
+            angle_difference = abs(slide_candidates[0][1] - slide_candidates[1][1])
+            
+            slide_edge_vector = slide_edge.other_vert(v1).co - v1.co
+            slide_direction = slide_edge_vector
+            counter_slide_edge_vector = other_edge.other_vert(v1).co - v1.co
+            contraslide_direction = counter_slide_edge_vector
+            
+            slide_offset = (slide_direction) * multiplier * (angle_difference)
+            counter_slide_offset = contraslide_direction * slide_offset.length
+            slide_offset = slide_offset - counter_slide_offset
+            
+            target_offsets[v1.index] = slide_offset
+    
+    return target_offsets
 
 
 def get_length(data):
@@ -870,24 +1003,64 @@ def evaluate_constraints(object, bmesh_edit=None, bmesh_eval=None, inverse_subdi
 
         domain = get_constraint_domain_type(c.constraint_type)
         # Get the vertices affected by the constraint
-        constraint_verts_loop_edit = utils.get_attribute_elements(
+        constraint_verts_loops_edit = utils.get_attribute_elements(
             object, bmesh_edit, c, domain=domain, as_domain="POINT"
         )
-        if len(constraint_verts_loop_edit) == 0:
+        if len(constraint_verts_loops_edit) == 0:
             continue
 
+        # Handle multi-loop format: [[verts1, is_circular1], [verts2, is_circular2], ...]
+        # For single-loop constraints (CURVE, PLANE_FIXED), unwrap to old format [verts, is_circular]
+        is_multi_loop = (
+            len(constraint_verts_loops_edit) > 0
+            and isinstance(constraint_verts_loops_edit[0], list)
+            and len(constraint_verts_loops_edit[0]) == 2
+            and isinstance(constraint_verts_loops_edit[0][0], list)
+        )
+        
+        if is_multi_loop and c.constraint_type in ["PLANE_FIXED", "CURVE"]:
+            # These constraints expect single loop format
+            constraint_verts_loop_edit = constraint_verts_loops_edit[0]
+        elif is_multi_loop:
+            # Multi-loop constraints (SLIDE_OPTIMIZE, PLANE)
+            constraint_verts_loop_edit = constraint_verts_loops_edit
+        else:
+            # Old format compatibility
+            constraint_verts_loop_edit = constraint_verts_loops_edit
+
+        # Handle subdivision
         if c.works_on_subdivision:
-            constraint_verts_loop = [[], constraint_verts_loop_edit[1]]
-            for v in constraint_verts_loop_edit[0]:
-                constraint_verts_loop[0].append(bmesh_eval.verts[v.index])
+            if is_multi_loop and c.constraint_type in ["SLIDE_OPTIMIZE", "PLANE"]:
+                # Convert all loops to subdivided mesh
+                constraint_verts_loop = []
+                for loop_data in constraint_verts_loop_edit:
+                    new_verts = []
+                    for v in loop_data[0]:
+                        new_verts.append(bmesh_eval.verts[v.index])
+                    constraint_verts_loop.append([new_verts, loop_data[1]])
+            else:
+                # Single loop format
+                constraint_verts_loop = [[], constraint_verts_loop_edit[1]]
+                for v in constraint_verts_loop_edit[0]:
+                    constraint_verts_loop[0].append(bmesh_eval.verts[v.index])
         else:
             constraint_verts_loop = constraint_verts_loop_edit
         # evaluate plane constraint
         if c.constraint_type == "PLANE":
-            if len(constraint_verts_loop[0]) > 2:
-                target_offsets = utils.flatten_verts_calculate(
-                    constraint_verts_loop[0], slide=False, method="best_fit"
-                )
+            # Handle multi-loop format
+            if is_multi_loop:
+                for loop_data in constraint_verts_loop:
+                    if len(loop_data[0]) > 2:
+                        loop_offsets = utils.flatten_verts_calculate(
+                            loop_data[0], slide=False, method="best_fit"
+                        )
+                        target_offsets.update(loop_offsets)
+            else:
+                # Single loop format
+                if len(constraint_verts_loop[0]) > 2:
+                    target_offsets = utils.flatten_verts_calculate(
+                        constraint_verts_loop[0], slide=False, method="best_fit"
+                    )
         # evaluate fixed plane constraint
         elif c.constraint_type == "PLANE_FIXED":
             if len(constraint_verts_loop[0]) > 2:
@@ -923,6 +1096,10 @@ def evaluate_constraints(object, bmesh_edit=None, bmesh_eval=None, inverse_subdi
                     inverse_subdivide_prep,
                     attribute_name=c.attribute_name,
                 )
+        
+        # evaluate slide optimize constraint
+        elif c.constraint_type == "SLIDE_OPTIMIZE":
+            target_offsets = slide_optimize_calculate(constraint_verts_loop)
 
         # move vertices to new locations
         # this has already weighting which might be a good idea with many constraints working together.
@@ -1054,13 +1231,20 @@ class CustomConstraint(bpy.types.PropertyGroup):
                 "MOD_SUBSURF",
                 3,
             ),
-            # ("CIRCLE", "Circle", "Circle constraint", "MESH_CIRCLE", 4),
+            (
+                "SLIDE_OPTIMIZE",
+                "Slide Optimize",
+                "Balance angles where quads meet by sliding vertices along edges",
+                "DRIVER_ROTATIONAL_DIFFERENCE",
+                4,
+            ),
+            # ("CIRCLE", "Circle", "Circle constraint", "MESH_CIRCLE", 5),
             # (
             #     "ANGLE",
             #     "Angle",
             #     "Limit angle for manufacturing purposes",
             #     "LINCURVE",
-            #     5,
+            #     6,
             # ),
         ],
         update=update_constraint_data,
@@ -1283,7 +1467,7 @@ class AddSelectionToConstraintOperator(bpy.types.Operator):
         return {"FINISHED"}
 
 def get_constraint_domain_type(constraint_type):
-    if constraint_type in ["PLANE", "PLANE_FIXED", "CURVE"]:
+    if constraint_type in ["PLANE", "PLANE_FIXED", "CURVE", "SLIDE_OPTIMIZE"]:
         return "EDGE"
     elif constraint_type == "INVERSE_SUBDIVIDE":
         return "POINT"
@@ -1316,13 +1500,20 @@ class AddConstraintOperator(bpy.types.Operator):
                 "MOD_SUBSURF",
                 3,
             ),
-            # ("CIRCLE", "Circle", "Circle constraint", "MESH_CIRCLE", 4),
+            (
+                "SLIDE_OPTIMIZE",
+                "Slide Optimize",
+                "Balance angles where quads meet",
+                "DRIVER_ROTATIONAL_DIFFERENCE",
+                4,
+            ),
+            # ("CIRCLE", "Circle", "Circle constraint", "MESH_CIRCLE", 5),
             # (
             #     "ANGLE",
             #     "Angle",
             #     "Limit angle for manufacturing purposes",
             #     "LINCURVE",
-            #     5,
+            #     6,
             # ),
         ],
     )
@@ -1462,7 +1653,7 @@ class CUSTOM_UL_constraint_list(bpy.types.UIList):
         # Use layout to display the constraint properties
         # layout.label(text=constraint.name)
 
-        layout.prop(constraint, "name", text="", emboss=False, icon="CONSTRAINT")
+        layout.prop(constraint, "name", text="", emboss=False)
         if constraint.constraint_type == "PLANE":
             icon = "MESH_PLANE"
         elif constraint.constraint_type == "PLANE_FIXED":
@@ -1473,6 +1664,8 @@ class CUSTOM_UL_constraint_list(bpy.types.UIList):
             icon = "MESH_CIRCLE"
         elif constraint.constraint_type == "INVERSE_SUBDIVIDE":
             icon = "MOD_SUBSURF"
+        elif constraint.constraint_type == "SLIDE_OPTIMIZE":
+            icon = "DRIVER_ROTATIONAL_DIFFERENCE"
 
         layout.label(icon=icon)
         if constraint.enabled:

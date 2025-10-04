@@ -238,14 +238,10 @@ class InverseSubdivideAddonPreferences(AddonPreferences):
         description="Use mirror modifier when evaluating",
     )
 
-
-def inverse_subdivide_UI_draw(self, context):
-    if not poll_final_topology(self, context):
-        return
-
+def final_topology_operators_draw(self, context):
     user_preferences = bpy.context.preferences.addons[__name__].preferences
-    active_obj = bpy.context.active_object
     layout = self.layout
+    active_obj = bpy.context.active_object
 
     layout.operator(
         FinalTopologyStep.bl_idname,
@@ -276,6 +272,15 @@ def inverse_subdivide_UI_draw(self, context):
     layout.prop(user_preferences, "always_on", toggle=True, icon="MOD_TIME")
     if user_preferences.always_on:
         layout.prop(user_preferences, "use_timer", toggle=False, icon="TIME")
+
+def inverse_subdivide_UI_draw(self, context):
+    if not poll_final_topology(self, context):
+        return
+
+    user_preferences = bpy.context.preferences.addons[__name__].preferences
+    active_obj = bpy.context.active_object
+    layout = self.layout
+
 
     layout.separator()
     layout.label(text="Snap to")
@@ -352,7 +357,7 @@ class VIEW3D_PT_final_topology_inverse_subdivide(Panel):
     bl_idname = "VIEW3D_PT_final_topology_inverse_subdivide"
     bl_space_type = "VIEW_3D"
     bl_region_type = "UI"
-    bl_label = "Inverse Subdivide"
+    bl_label = "Inverse Subdivide settings"
     bl_parent_id = "VIEW3D_PT_final_topology_editmode"
     bl_options = {"DEFAULT_CLOSED"}
 
@@ -403,6 +408,7 @@ class VIEW3D_PT_final_topology_editmode(Panel):
         layout = self.layout
         op = layout.operator("wm.url_open", text="Watch tutorial", icon="SEQUENCE")
         op.url = "https://youtu.be/5JWf-B89msU?si=Nt8t7JwvngNI3bN9"
+        final_topology_operators_draw(self, context)
 
 
 def slide_menu_func(self, context):

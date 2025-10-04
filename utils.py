@@ -158,17 +158,17 @@ def get_attribute_elements(
     # not all are implemented now, let's add them as needed
     if as_domain != domain:
         if as_domain == "POINT" and domain == "EDGE":
-            # return now edges as sorted
-            return_elements = []
-            # By now I see no reason why to use multiple loops withing one constraint,
-            # but it might be useful in the future
+            # return now edges as sorted into loops
             if len(loops) == 0:
-                return return_elements
-
-            for i in loops[0][0]:
-                return_elements.append(bm.verts[i])
-            # add back info if loop is circular
-            return_elements = [return_elements, loops[0][1]]
+                return_elements = []
+            else:
+                # Convert vertex indices to actual vertex objects for all loops
+                return_elements = []
+                for loop in loops:
+                    vert_list = []
+                    for i in loop[0]:
+                        vert_list.append(bm.verts[i])
+                    return_elements.append([vert_list, loop[1]])  # [vertices, is_circular]
 
         elif as_domain == "POINT" and domain == "FACE":
             unique_vertices = set()
