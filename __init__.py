@@ -21,11 +21,11 @@ if "bpy" in locals():
         has_extras = False
         print(e)
 
-    inverse_subdivide = reload(inverse_subdivide)
+    final_topology = reload(final_topology)
     draw = reload(draw)
     utils = reload(utils)
 else:
-    from .inverse_subdivide import *
+    from .final_topology import *
 
     try:
         from . import extras
@@ -33,7 +33,7 @@ else:
     except Exception as e:
         has_extras = False
         print(e)
-    from . import inverse_subdivide
+    from . import final_topology
     from . import draw
     from . import utils
 
