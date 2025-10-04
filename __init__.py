@@ -464,32 +464,32 @@ def register():
 
     bpy.types.VIEW3D_MT_edit_mesh_edges.append(slide_menu_func)
 
-    if has_extras:
-        extras.register()
-
     wm = bpy.context.window_manager
-    km = wm.keyconfigs.addon.keymaps.new(name="Window", space_type="VIEW_3D")
+    km = wm.keyconfigs.addon.keymaps.new(name="Window", space_type="EMPTY")
 
     kmi = km.keymap_items.new(
         "mesh.final_topology_modal",
-        type="FIVE",
+        type="T",
         value="PRESS",
-        ctrl=False,
+        ctrl=True,
         shift=False,
-        alt=False,
+        alt=True,
     )
     addon_keymapitems.append(kmi)
     kmi = km.keymap_items.new(
         "mesh.final_topology_optimization_step",
-        type="FOUR",
+        type="O",
         value="PRESS",
-        ctrl=False,
+        ctrl=True,
         shift=False,
-        alt=False,
+        alt=True,
     )
     print("SHORTCUTS REGISTERED")
     addon_keymapitems.append(kmi)
 
+
+    if has_extras:
+        extras.register()
 
 def unregister():
     # Remove classes

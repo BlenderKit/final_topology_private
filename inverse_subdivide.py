@@ -404,7 +404,6 @@ def evaluate_inverse_subdivide(
             filtered_neighbours = []
             for v in neighbours:
                 bm_v = bm_edit.verts[v.index]
-                print(bm_v[attribute_layer])
                 if bm_v[attribute_layer] > 0.001:
                     filtered_neighbours.append(v)
             neighbours = filtered_neighbours
