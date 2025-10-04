@@ -71,6 +71,14 @@ class FinalTopologyObjectProperties(PropertyGroup):
     target_collection: PointerProperty(
         type=bpy.types.Collection, name="Target Collection"
     )
+    normal_offset: FloatProperty(
+        name="Normal Offset",
+        default=0.0,
+        soft_min=-0.2,
+        soft_max=0.2,
+        description="Normal offset",
+        unit="LENGTH",
+    )
 
 
 class PopupDialog(bpy.types.Operator):
@@ -189,8 +197,8 @@ class InverseSubdivideAddonPreferences(AddonPreferences):
         description="Alpha of the overlays",
     )
 
-    offset_weight: FloatProperty(
-        name="Offset Weight",
+    step_weight: FloatProperty(
+        name="Step Weight",
         default=0.2,
         min=0.1,
         max=1,
@@ -232,7 +240,7 @@ class InverseSubdivideAddonPreferences(AddonPreferences):
 
 
 def inverse_subdivide_UI_draw(self, context):
-    if not poll_inverse_subdivide(self, context):
+    if not poll_final_topology(self, context):
         return
 
     user_preferences = bpy.context.preferences.addons[__name__].preferences
@@ -240,14 +248,14 @@ def inverse_subdivide_UI_draw(self, context):
     layout = self.layout
 
     layout.operator(
-        InverseSubdivideStep.bl_idname,
+        FinalTopologyStep.bl_idname,
         text="Inverse Subdivide Step",
         icon="TRACKING_FORWARDS_SINGLE",
     )
 
     if active_obj.final_topology.enable_operator:
         layout.operator(
-            InverseSubdivideModal.bl_idname,
+            finalTopologyModal.bl_idname,
             text="Inverse Subdsurf Modal",
             icon="MOD_SUBSURF",
             emboss=True,
@@ -255,7 +263,7 @@ def inverse_subdivide_UI_draw(self, context):
         )
     else:
         layout.operator(
-            InverseSubdivideModal.bl_idname,
+            finalTopologyModal.bl_idname,
             text="Inverse Subdsurf Modal",
             icon="MOD_SUBSURF",
             emboss=True,
@@ -287,6 +295,7 @@ def inverse_subdivide_UI_draw(self, context):
         elif active_obj.final_topology.use_object_or_collection == "COLLECTION":
             row.prop(active_obj.final_topology, "target_collection", text="")
 
+    layout.prop(active_obj.final_topology, "normal_offset", text="Normal Offset")
     if has_extras:
         layout.separator()
         layout.prop(user_preferences, "iterations")
@@ -295,7 +304,7 @@ def inverse_subdivide_UI_draw(self, context):
     if has_extras:
         layout.prop(user_preferences, "weight_algorithm")
     layout.prop(user_preferences, "use_mirror")
-    layout.prop(user_preferences, "offset_weight")
+    layout.prop(user_preferences, "step_weight")
 
 
 class VIEW3D_PT_final_topology_overlays(Panel):
@@ -388,7 +397,7 @@ class VIEW3D_PT_final_topology_editmode(Panel):
 
     @classmethod
     def poll(self, context):
-        return poll_inverse_subdivide(self, context)
+        return poll_final_topology(self, context)
 
     def draw(self, context):
         layout = self.layout
@@ -402,7 +411,7 @@ def slide_menu_func(self, context):
     )
 
 
-def poll_inverse_subdivide(self, context):
+def poll_final_topology(self, context):
     if bpy.context.mode != "EDIT_MESH":
         return False
     ob = bpy.context.active_object
@@ -413,8 +422,9 @@ def poll_inverse_subdivide(self, context):
     return True
 
 
-def draw_inverse_subdivide_toggle(self, context):
-    if not poll_inverse_subdivide(self, context):
+def draw_final_topology_toggle(self, context):
+    # This can be added to header, but not sure about it's usefulness by now.
+    if not poll_final_topology(self, context):
         return
 
     active_obj = context.active_object
@@ -430,8 +440,8 @@ def draw_inverse_subdivide_toggle(self, context):
 
 classes = [
     FinalTopologyObjectProperties,
-    InverseSubdivideModal,
-    InverseSubdivideStep,
+    finalTopologyModal,
+    FinalTopologyStep,
     FreezeShape,
     FinalUnsubdivide,
     InverseSubdivideAddonPreferences,
@@ -461,7 +471,7 @@ def register():
     km = wm.keyconfigs.addon.keymaps.new(name="Window", space_type="VIEW_3D")
 
     kmi = km.keymap_items.new(
-        "mesh.inverse_subdivide_modal",
+        "mesh.final_topology_modal",
         type="FIVE",
         value="PRESS",
         ctrl=False,

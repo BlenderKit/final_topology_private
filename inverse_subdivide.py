@@ -449,7 +449,7 @@ def final_topology_optimization_step(self, context, iterations=1, neighbours=1):
                 user_preferences,
                 target_objects,
                 self.object,
-                0.0
+                self.object.final_topology.normal_offset
             )
 
         for v in neighbors:
@@ -470,7 +470,7 @@ def final_topology_optimization_step(self, context, iterations=1, neighbours=1):
             # align offset with vert normal.
             if offset.length > 0:
                 # weight the offset down, to prevent instabilities.
-                offset *= user_preferences.offset_weight
+                offset *= user_preferences.step_weight
 
                 if v.normal.angle(offset) > radians(90):
                     # if the offset is in the opposite direction of the normal,
@@ -524,11 +524,11 @@ def get_target_objects(self):
     return target_objects
 
 
-class InverseSubdivideStep(Operator):
+class FinalTopologyStep(Operator):
     bl_idname = "mesh.final_topology_optimization_step"
-    bl_label = "Inverse Subdivide Snapping Step"
+    bl_label = "Final Topology Step"
     bl_description = (
-        "Run the subdivision compensation one step. "
+        "Run the subdivision optimisation just step by step. "
         "\n\nIf you need stable behaviour and \n"
         "want only use the tool locally, run this operator whenever needed"
     )
@@ -572,9 +572,9 @@ class InverseSubdivideStep(Operator):
         return self.execute(context)
 
 
-class InverseSubdivideModal(Operator):
-    bl_idname = "mesh.inverse_subdivide_modal"
-    bl_label = "Inverse Subdivide Snapping Modal"
+class finalTopologyModal(Operator):
+    bl_idname = "mesh.final_topology_modal"
+    bl_label = "Final Topology Snapping Modal"
     bl_description = (
         "Start compensating for inverse subdivision."
         "\n\nUse CTRL during transorms to initiate."
