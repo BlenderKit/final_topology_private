@@ -264,7 +264,9 @@ def process_vertex_raycast(
         # add the normal offset to the offset_vector
         if normal_offset != 0.0:
             offset_vector += normal_offset * res_v.normal
-
+        # need this to visualize correct offset
+        global_offset_hit_position = (res_v.co + offset_vector) 
+        global_offset_hit_position = ob_matrix_world @ global_offset_hit_position
         
         # Add draw data
         l = offset_vector.length / user_preferences.gradient_sensitivity_distance
@@ -273,7 +275,7 @@ def process_vertex_raycast(
             color = (min(1, l), max(0, 1 - l), 0.0, 0.1)
             draw.add_arrow(
                 world_source_position,
-                hit_position,
+                global_offset_hit_position,
                 color,
                 scale=user_preferences.arrow_scale,
             )
