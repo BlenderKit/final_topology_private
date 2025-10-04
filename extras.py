@@ -853,12 +853,13 @@ def check_constraints_cache(object):
             constraints_cache.append(cc_dict)
 
 
-def evaluate_constraints(object, bmesh_edit=None, bmesh_eval=None):
+def evaluate_constraints(object, bmesh_edit=None, bmesh_eval=None, inverse_subdivide_prep=None):
     global constraints_cache
     # separate caching for performance
     check_constraints_cache(object)
     cs = object.data.ft_custom_constraints
     target_offsets_all = []
+    user_preferences = bpy.context.preferences.addons[__package__].preferences
 
     for i, c in enumerate(cs):
         # skip disabled constraints
@@ -866,9 +867,11 @@ def evaluate_constraints(object, bmesh_edit=None, bmesh_eval=None):
             continue
 
         target_offsets = {}
+
+        domain = get_constraint_domain_type(c.constraint_type)
         # Get the vertices affected by the constraint
         constraint_verts_loop_edit = utils.get_attribute_elements(
-            object, bmesh_edit, c, domain="EDGE", as_domain="POINT"
+            object, bmesh_edit, c, domain=domain, as_domain="POINT"
         )
         if len(constraint_verts_loop_edit) == 0:
             continue
@@ -900,19 +903,27 @@ def evaluate_constraints(object, bmesh_edit=None, bmesh_eval=None):
         # evaluate curve constraint
         elif c.constraint_type == "CURVE":
             if c.target_curve is not None and c.target_curve.type == "CURVE":
-                # bpy.ops.geometry.execute_node_group(name="Tool", session_uuid=501)
-                # bpy.ops.geometry.execute_node_group(
-                #     name="snap attribute to curve", session_uuid=500
-                # )
                 target_offsets = to_curve_verts_calculate(
                     constraint_verts_loop,
                     curve_snapping=c.curve_snapping,
                     curve_distribution=c.curve_distribution,
-                    kd=constraints_cache[i][
-                        "kd"
-                    ],  # Disabled the cache now not to make any mess...
+                    kd=constraints_cache[i]["kd"],
                     source_curve=c.target_curve,
                 )
+        # evaluate inverse subdivide constraint
+        elif c.constraint_type == "INVERSE_SUBDIVIDE":
+            from . import inverse_subdivide
+
+            if len(inverse_subdivide_prep["target_objects"]) > 0:
+
+                target_offsets = inverse_subdivide.evaluate_inverse_subdivide(
+                    object,
+                    bmesh_edit,
+                    bmesh_eval,
+                    inverse_subdivide_prep,
+                    attribute_name=c.attribute_name,
+                )
+
         # move vertices to new locations
         # this has already weighting which might be a good idea with many constraints working together.
         if DEBUG_DRAW:
@@ -923,7 +934,7 @@ def evaluate_constraints(object, bmesh_edit=None, bmesh_eval=None):
                     (1, 0, 0, 1),
                     scale=1,
                 )
-        utils.move_verts_to_targets(bmesh_edit, target_offsets, weight=0.1)
+        utils.move_verts_to_targets(bmesh_edit, target_offsets, weight=user_preferences.step_weight)
 
     return bmesh_edit
 
@@ -1006,12 +1017,15 @@ def update_constraint_index(self, context):
     ]
     bm = bmesh.from_edit_mesh(context.object.data)
     draw.clear_draw_list()
-    edges = utils.get_attribute_elements(
-        context.object, bm, constraint, domain="EDGE", as_domain="EDGE"
+    domain = get_constraint_domain_type(constraint.constraint_type)
+    
+    elements = utils.get_attribute_elements(
+        context.object, bm, constraint, domain=domain, as_domain=domain
     )
-    if len(edges) > 0:
+
+    if len(elements) > 0:
         bpy.ops.mesh.select_all(action="DESELECT")
-        for e in edges:
+        for e in elements:
             e.select = True
 
 
@@ -1033,13 +1047,13 @@ class CustomConstraint(bpy.types.PropertyGroup):
             ("PLANE", "Plane", "Planar constraint", "MESH_PLANE", 0),
             ("PLANE_FIXED", "Plane Fixed", "Planar constraint fixed", "MESH_PLANE", 1),
             ("CURVE", "Curve", "Curve constraint", "CURVE_DATA", 2),
-            # (
-            #     "INVERSE_SUBDIVIDE",
-            #     "Inverse subdivide",
-            #     "If added as a constraint, this works only on the assigned vertices, you can snap to more objects this way.",
-            #     "MOD_SUBSURF",
-            #     3,
-            # ),
+            (
+                "INVERSE_SUBDIVIDE",
+                "Inverse subdivide",
+                "If added as a constraint, this works only on the assigned vertices, you can snap to more objects this way.",
+                "MOD_SUBSURF",
+                3,
+            ),
             # ("CIRCLE", "Circle", "Circle constraint", "MESH_CIRCLE", 4),
             # (
             #     "ANGLE",
@@ -1211,7 +1225,7 @@ def add_selection_to_attribute(
     attribute = mesh.attributes.get(attribute_name)
     if attribute is None:
         attribute = mesh.attributes.new(
-            name=attribute_name, type="FLOAT", domain="POINT"
+            name=attribute_name, type="FLOAT", domain=domain
         )
     attribute.data.foreach_set("value", values)
 
@@ -1261,11 +1275,18 @@ class AddSelectionToConstraintOperator(bpy.types.Operator):
         bm = bmesh.from_edit_mesh(mesh)
         constraint = mesh.ft_custom_constraints[mesh.ft_custom_constraints_index]
         attribute_name = constraint.attribute_name
+        domain = get_constraint_domain_type(constraint.constraint_type)
         attribute_name = add_selection_to_attribute(
-            attribute_name, mesh, remove=self.remove, domain="EDGE"
+            attribute_name, mesh, remove=self.remove, domain=domain
         )
         constraint.attribute_name = attribute_name
         return {"FINISHED"}
+
+def get_constraint_domain_type(constraint_type):
+    if constraint_type in ["PLANE", "PLANE_FIXED", "CURVE"]:
+        return "EDGE"
+    elif constraint_type == "INVERSE_SUBDIVIDE":
+        return "POINT"
 
 
 class AddConstraintOperator(bpy.types.Operator):
@@ -1288,13 +1309,13 @@ class AddConstraintOperator(bpy.types.Operator):
             ("PLANE", "Plane", "Planar constraint", "MESH_PLANE", 0),
             ("PLANE_FIXED", "Plane Fixed", "Planar constraint fixed", "MESH_PLANE", 1),
             ("CURVE", "Curve", "Curve constraint", "CURVE_DATA", 2),
-            # (
-            #     "INVERSE_SUBDIVIDE",
-            #     "Inverse subdivide",
-            #     "Inverse subdivide",
-            #     "MOD_SUBSURF",
-            #     3,
-            # ),
+            (
+                "INVERSE_SUBDIVIDE",
+                "Inverse subdivide",
+                "Inverse subdivide",
+                "MOD_SUBSURF",
+                3,
+            ),
             # ("CIRCLE", "Circle", "Circle constraint", "MESH_CIRCLE", 4),
             # (
             #     "ANGLE",
@@ -1368,14 +1389,21 @@ class AddConstraintOperator(bpy.types.Operator):
             center, normal = utils.estimate_best_fit_plane(selected_verts, "best_fit")
             new_constraint.center = center
             new_constraint.normal = normal
+
+        domain = get_constraint_domain_type(self.constraint_type)
         attribute_name = fill_attribute_with_selection(
-            attribute_name, mesh, type="FLOAT", domain="EDGE", new=True
+            attribute_name, mesh, type="FLOAT", domain=domain, new=True
         )
         # we name the attribute after its creation, since we couldn't be sure about it's .00x ending
         new_constraint.attribute_name = attribute_name
 
         new_constraint.color = (random(), random(), random())
 
+        # Set name to the type of constraint, if the name is default
+        if self.name == "Constraint":
+            new_constraint.name = self.constraint_type.capitalize()
+        # push undo step
+        bpy.ops.ed.undo_push()
         return {"FINISHED"}
 
     def invoke(self, context, event):

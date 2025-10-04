@@ -1,5 +1,3 @@
-from math import radians
-
 # from .draw import *
 # from .utils import *
 import bmesh
@@ -8,7 +6,7 @@ from bpy.props import BoolProperty, IntProperty
 from bpy.types import Operator
 from mathutils import Vector
 
-from . import draw, utils
+from . import draw, utils, inverse_subdivide
 
 has_extras = True
 try:
@@ -19,135 +17,6 @@ except:
 running_operator = None
 
 
-def get_closest_ray_hit(
-    objects=[], source_position=Vector(), cast_direction=Vector(), depsgraph=None
-):
-    """
-    Cast a ray and return the closest hit object and hit point in world space.
-    Returns None if no hit.
-    """
-    hit_data = []
-
-    for ob in objects:
-        # Compute the transformation from world coordinates to object coordinates
-        world_to_object = ob.matrix_world.inverted()
-
-        # Transform the ray's origin and direction to object space
-        local_origin = world_to_object @ source_position
-        local_direction = world_to_object.to_3x3() @ cast_direction
-
-        for direction in [local_direction, -local_direction]:
-            # Cast the ray in object space
-            hit, hit_position, hit_normal, hit_index = ob.ray_cast(
-                local_origin, direction, depsgraph=depsgraph
-            )
-
-            if hit:
-                # Transform the hit position back to world space
-                world_hit_position = ob.matrix_world @ hit_position
-
-                # Store hit position and distance
-                hit_data.append(
-                    (world_hit_position, (world_hit_position - source_position).length)
-                )
-
-    # Return None if no hit
-    if len(hit_data) == 0:
-        return None
-
-    # Sort by distance
-    hit_data.sort(key=lambda x: x[1])
-    # Return the closest hit
-    return hit_data[0][0]
-
-
-def get_neighbors_subdivide_levels(input_verts, levels, only_last=True):
-    """
-    Get neighboring vertices in a quad mesh, traversing in a "straight" direction
-    through junction vertices.
-
-    Parameters:
-        input_verts (list): List of root vertices to start from.
-        levels (int): Number of levels to traverse.
-        only_last (bool): Whether to include only the last level vertices.
-
-    Returns:
-        list: List of unique neighboring vertices.
-    """
-
-    # Initialize list to store neighboring vertices within levels
-    neighbors_within_levels = input_verts[:]
-
-    def find_neighbors(vertex, incoming_edge, level):
-        """Recursive function to find neighbor vertices."""
-        if level == 0:
-            return
-
-        # Traverse in all directions for the first level of neighbors
-        if incoming_edge is None:
-            for edge in vertex.link_edges:
-                opposite_vertex = edge.other_vert(vertex)
-                if not only_last or level == 1:
-                    # add_line(vertex.co, opposite_vertex.co, GREEN)
-
-                    neighbors_within_levels.append(opposite_vertex)
-                find_neighbors(opposite_vertex, edge, level - 1)
-            return
-
-        # Identify neighboring faces of the incoming edge
-        neighbor_faces = incoming_edge.link_faces
-        incoming_face_edges = set(e for f in neighbor_faces for e in f.edges)
-
-        # Find the edge that is opposite to the incoming edge
-        for edge in vertex.link_edges:
-            if edge not in incoming_face_edges:
-                opposite_vertex = edge.other_vert(vertex)
-                if not only_last or level == 1:
-                    # add_line(vertex.co, opposite_vertex.co, GREEN)
-
-                    neighbors_within_levels.append(opposite_vertex)
-                find_neighbors(opposite_vertex, edge, level - 1)
-
-    # Begin traversal from each input vertex
-    for vert in input_verts:
-        find_neighbors(vert, None, level=levels)
-
-    # Convert to a list of unique vertices
-    unique_neighbors_within_levels = list(set(neighbors_within_levels))
-
-    return unique_neighbors_within_levels
-
-
-def get_neighbors_within_levels(input_verts, levels):
-    # List to store neighboring vertices within levels
-    neighbors_within_levels = input_verts[:]
-
-    def find_neighbors(vertex, level):
-        """
-        Recursive function to find neighbor vertices.
-        """
-        if level == 0:
-            return
-        for face in vertex.link_faces:
-            for neighbor_vertex in face.verts:
-                if (
-                    neighbor_vertex != vertex
-                    and neighbor_vertex not in neighbors_within_levels
-                ):
-                    neighbors_within_levels.append(neighbor_vertex)
-                    find_neighbors(neighbor_vertex, level - 1)
-
-    # Loop through selected vertices and find neighbors for specified levels
-    for vert in input_verts:
-        find_neighbors(vert, level=levels)
-
-    # Convert neighbors to a unique list
-    unique_neighbors_within_levels = list(set(neighbors_within_levels))
-    # for v in unique_neighbors_within_levels:
-    #     add_arrow(v.co, v.co+ v.normal*.02, GREEN)
-    # Free the BMesh
-
-    return unique_neighbors_within_levels
 
 
 def set_modifiers_start(obj):
@@ -199,169 +68,16 @@ def set_modifiers_end(obj, modifiers_state_start):
             obj.modifiers.remove(modifier)
 
 
-def get_subdivision_modifier_level(obj):
-    """
-    Get the subdivision modifier level of an object if present.
-
-    Args:
-    obj (bpy.types.Object): The Blender object to check for the subdivision modifier.
-
-    Returns:
-    int: The subdivision modifier level (number of subdivisions), or None if no subdivision modifier is present.
-    """
-    if obj is not None and obj.type == "MESH":
-        for modifier in obj.modifiers:
-            if modifier.type == "SUBSURF":
-                if modifier.show_in_editmode and modifier.show_viewport:
-                    return modifier.levels
-    return None
-
-
-def process_vertex_raycast(
-    i, bm_eval, offset_verts_hit_positions, user_preferences, target_objects, obj, normal_offset = 0.0
-):
-    """
-    Process a single vertex in the mesh to calculate its offset based on raycasting.
-
-    Parameters:
-    - i: The index of the vertex in the BMesh
-    - bm_eval: The evaluated BMesh
-    - offset_verts_hit_positions: Dictionary to store hit positions and offset_vectors
-    - user_preferences: User-defined settings
-    - target_objects: List of target objects for raycasting
-    - ob_matrix_world: Object's world transformation matrix
-    """
-
-    # Raycast logic
-    res_v = bm_eval.verts[i]
-
-    ob_matrix_world = obj.matrix_world
-    # Transform vertex coordinates to world space
-    world_source_position = ob_matrix_world @ res_v.co
-
-    # Transform vertex normal to world space
-    world_cast_direction = (
-        ob_matrix_world.to_3x3().transposed().inverted() @ -res_v.normal
-    )
-    world_cast_direction.normalize()
-
-    # Get the closest hit on the target mesh
-    hit_position = get_closest_ray_hit(
-        objects=target_objects,
-        source_position=world_source_position,
-        cast_direction=world_cast_direction,
-    )
-
-    # add_arrow(world_source_position, world_source_position + world_cast_direction * .01, RED)
-
-    if hit_position is not None:
-        # Transform hit_position to the active object's local space
-        ob_matrix_world_inv = ob_matrix_world.inverted()
-        local_hit_position = ob_matrix_world_inv @ hit_position
-
-        # Calculate the offset_vector vector
-        offset_vector = local_hit_position - res_v.co
-        # add the normal offset to the offset_vector
-        if normal_offset != 0.0:
-            offset_vector += normal_offset * res_v.normal
-        # need this to visualize correct offset
-        global_offset_hit_position = (res_v.co + offset_vector) 
-        global_offset_hit_position = ob_matrix_world @ global_offset_hit_position
-        
-        # Add draw data
-        l = offset_vector.length / user_preferences.gradient_sensitivity_distance
-        if offset_vector.length < user_preferences.max_distance:
-            # let's not draw radical overshoots that won't be counted anyway.
-            color = (min(1, l), max(0, 1 - l), 0.0, 0.1)
-            draw.add_arrow(
-                world_source_position,
-                global_offset_hit_position,
-                color,
-                scale=user_preferences.arrow_scale,
-            )
-
-            for f in res_v.link_faces:
-                draw.add_face(f, obj, color)
-    else:
-        offset_vector = Vector((0, 0, 0))
-
-    # Store the hit position and offset_vector
-    offset_verts_hit_positions[i] = (hit_position, offset_vector)
-
-
-def calculate_offset(
-    bm_eval,
-    offset_verts_indices,
-    offset_verts_hit_positions,
-    v_index,
-    user_preferences,
-    target_objects,
-    depsgraph,
-):
-    """Calculate offset of vertices. takes the whole groups of vertices that are taken into account (by now middle of connecting edges).
-    it calculates the offset with weights, where longer edges get higher weight than shorter
-    """
-    user_preferences = bpy.context.preferences.addons[__package__].preferences
-
-    total_offset_vector = Vector((0, 0, 0))
-    results_counted = 0
-    total_weight = 0
-
-    main_vert = bm_eval.verts[v_index]
-    distances = []
-    # iterate twice, we first need to get the max distance between verts
-    total_distance = 0
-    for range_i, i in enumerate(offset_verts_indices):
-        res_v = bm_eval.verts[i]
-        dist = (main_vert.co - res_v.co).length
-        distances.append(dist)
-        if i != v_index:
-            total_distance += dist
-
-    max_distance = max(distances)
-
-    for range_i, i in enumerate(offset_verts_indices):
-        res_v = bm_eval.verts[i]
-        hit_position, offset_vector = offset_verts_hit_positions[i]
-        if hit_position is not None:
-            if offset_vector.length < user_preferences.max_distance:
-                results_counted += 1
-                if i == v_index:
-                    total_weight += 1
-                    total_offset_vector += offset_vector
-                elif len(offset_verts_indices) > 1:
-                    dist = distances[range_i]
-                    if user_preferences.weight_algorithm == "FIRSTONLY":
-                        others_weight = 0
-                    elif user_preferences.weight_algorithm == "ALL1":
-                        others_weight = 1
-                    elif user_preferences.weight_algorithm == "FIRST":
-                        others_weight = 1 / (len(offset_verts_indices) - 1)
-                    elif user_preferences.weight_algorithm == "FIRSTDIST":
-                        if total_distance == 0:
-                            others_weight = 1
-                        else:
-                            others_weight = dist / total_distance
-
-                    total_weight += others_weight
-                    total_offset_vector += offset_vector * others_weight
-
-    offset = Vector((0, 0, 0))
-    if results_counted > 0 and total_weight > 0:
-        offset = total_offset_vector / total_weight
-    return offset
-
 
 def final_topology_optimization_step(self, context, iterations=1, neighbours=1):
     """Runs all optimization steps:
-    - inverse subdivide
+    - if extras are not present or constraint list is empty, only inverse subdivide is run.
+    - if there are any constraints, inverse subdivide is skipped, unless it's in the constraints.
     - constraints
-    (these should be the same after addon rewrite)
     """
-    # prepare for inverse subdivide operations
     user_preferences = bpy.context.preferences.addons[__package__].preferences
-    s_levels = get_subdivision_modifier_level(self.object)
-    # Keep running, but do nothing
+
+    s_levels = inverse_subdivide.get_subdivision_modifier_level(self.object)
     if s_levels is None:
         self.report(
             {"WARNING"},
@@ -369,58 +85,23 @@ def final_topology_optimization_step(self, context, iterations=1, neighbours=1):
         )
         return False
 
-    #  this needs proper iteration of real neighbours, should actually try to find the 4 center vertices around if more levels are there.
-    self.level_subs_neighbours = 1 * 2 ** (s_levels - 1)
-    # get inverse subdivision target objects
-    target_objects = get_target_objects(self)
-    if len(target_objects) == 0:
-        if not self.warning_posted:
-            self.warning_posted = True
-            bpy.ops.wm.final_topo_popup_dialog(
-                "INVOKE_DEFAULT",
-                message="Inverse-subdivide target objects should be visible mesh objects.\n "
-                "Please check your settup in the snap settings.",
-                width=600,
-            )
-        return False
-
-    mirror_data = None
-    # apply mirror constraints
-    if user_preferences.use_mirror:
-        # check if there's a mirror modifier
-        for mod in self.object.modifiers:
-            if mod.type == "MIRROR":
-                mirror_data = utils.get_mirror_data(self.object)
-                break
-
-    me = self.object.data
-    bm_edit = bmesh.from_edit_mesh(me)
-    selected_verts = [v for v in bm_edit.verts if v.select]
-    # neighbors are all vertices (selected and neighbors) of the edit mesh that can be tweaked.
-    neighbors = get_neighbors_within_levels(selected_verts, neighbours)
+    
 
     depsgraph = bpy.context.evaluated_depsgraph_get()
     bm_eval = utils.get_evaluated_bm(self.object, depsgraph)
+    me = self.object.data
+    bm_edit = bmesh.from_edit_mesh(me)
 
-    # we need to ray-cast every iteration.
-    # let's get the neighbours for each vert separately on the subdivided mesh
-    offset_verts_indices = {}
-    for v in neighbors:
-        offset_verts = [bm_eval.verts[v.index]]
-        # get neighbours on eval mesh
-        if user_preferences.weight_algorithm != "FIRSTONLY":
-            offset_verts = get_neighbors_subdivide_levels(
-                offset_verts, self.level_subs_neighbours
-            )
-        # store the indices of the offset verts(basically cage vert with it's neighbours) per vertex
-        offset_verts_indices[v.index] = [v.index for v in offset_verts]
+    inverse_subdivide_prep = inverse_subdivide.prepare_inverse_subdivide(
+        self.object, bm_edit, bm_eval
+    )
 
-    # now we only want to calculate raycast for each vertex once, so we need to get unique indices
-    # and then calculate the offset for each vertex
-    unique_indices = set()
-    for v in neighbors:
-        unique_indices.update(offset_verts_indices[v.index])
-
+    has_constraints = (
+        has_extras
+        and hasattr(self.object.data, "ft_custom_constraints")
+        and len(self.object.data.ft_custom_constraints) > 0
+    )
+    
     for a in range(0, iterations):
         draw.clear_draw_list()
         if a > 0:
@@ -429,104 +110,26 @@ def final_topology_optimization_step(self, context, iterations=1, neighbours=1):
             depsgraph = bpy.context.evaluated_depsgraph_get()
             bm_eval = utils.get_evaluated_bm(self.object, depsgraph)
 
-        
-        if has_extras:
-            # Evaluate constraints
-            # TODO: inverse subdivide step should become a constraint. 
-            # Same as other constraints, it needs a preparation step, 
-            # and then evaluation that happens in iterations.
-            bm_edit.verts.ensure_lookup_table()
+        bm_edit.verts.ensure_lookup_table()
 
+        if has_constraints:
             bm_edit = extras.evaluate_constraints(
-                self.object, bmesh_edit=bm_edit, bmesh_eval=bm_eval
+                self.object, bmesh_edit=bm_edit, bmesh_eval=bm_eval, inverse_subdivide_prep = inverse_subdivide_prep
             )
         else:
-            bm_edit = bmesh.from_edit_mesh(me)
-
-        # we need to ray-cast every iteration.
-        offset_verts_hit_positions = {}
-        for i in unique_indices:
-            # raycast logic
-            process_vertex_raycast(
-                i,
-                bm_eval,
-                offset_verts_hit_positions,
-                user_preferences,
-                target_objects,
+            # default behaviour with no constraints and in artist version - only inverse subdivide
+            target_offsets = inverse_subdivide.evaluate_inverse_subdivide(
                 self.object,
-                self.object.final_topology.normal_offset
-            )
-
-        for v in neighbors:
-            if offset_verts_indices.get(v.index) is None:
-                # TODO find out why sometimes the key isn't in the dict, otherwise this condition wouldn't be here.
-                continue
-            # calculate the offset for the vertex
-            offset = calculate_offset(
+                bm_edit,
                 bm_eval,
-                offset_verts_indices[v.index],
-                offset_verts_hit_positions,
-                v.index,
-                user_preferences,
-                target_objects,
-                depsgraph,
+                inverse_subdivide_prep,
             )
-
-            # align offset with vert normal.
-            if offset.length > 0:
-                # weight the offset down, to prevent instabilities.
-                offset *= user_preferences.step_weight
-
-                if v.normal.angle(offset) > radians(90):
-                    # if the offset is in the opposite direction of the normal,
-                    # we need to invert it to go along with the original offset
-                    v_normal_offset = -v.normal * offset.length
-                else:
-                    v_normal_offset = v.normal * offset.length
-
-                # check if vert is close to some of the mirror planes, and if so, snap the offset to the mirror plane
-                if mirror_data is not None:
-                    for mirror_center, mirror_normal, merge_distance in mirror_data:
-                        if (v.co - mirror_center).dot(mirror_normal) < merge_distance:
-                            # vertex is close to mirror plane
-                            v.co += v_normal_offset
-                            to_center = mirror_center - v.co
-                            distance_to_plane = to_center.dot(mirror_normal)
-                            v.co += distance_to_plane * mirror_normal
-                        else:
-                            # vertex is not close to mirror plane
-                            v.co += v_normal_offset
-                else:
-                    v.co += v_normal_offset
+            utils.move_verts_to_targets(bm_edit, target_offsets, weight=user_preferences.step_weight)
 
         bmesh.update_edit_mesh(me)
     return True
 
 
-def get_target_objects(self):
-    active_obj = bpy.context.active_object
-    if not active_obj:
-        return []
-
-    target_objects = []
-    if active_obj.final_topology.use_object_or_collection == "COLLECTION":
-        target_collection = active_obj.final_topology.target_collection
-        if target_collection:
-            for ob in target_collection.objects:
-                if ob.type == "MESH" and ob.visible_get():
-                    target_objects.append(ob)
-    elif active_obj.final_topology.use_object_or_collection == "OBJECT":
-        tob = active_obj.final_topology.target_object
-        if tob is not None and tob.type == "MESH" and tob.hide_viewport is False:
-            target_objects.append(tob)
-    else:
-        # get all visible objects for scene option
-        target_objects = [
-            obj
-            for obj in bpy.context.scene.objects
-            if (obj.visible_get() and obj.type == "MESH" and obj != self.object)
-        ]
-    return target_objects
 
 
 class FinalTopologyStep(Operator):
