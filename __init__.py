@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Final Topology - Inverse subdivide",
     "author": "Vilem Duha, BlenderKit",
-    "version": (1, 2, 1),
+    "version": (2, 0, 0),
     "blender": (4, 0, 0),
     "location": "View3D > Sidebar > Edit > Final Topology",
     "description": "Professional subdivision modelling tools, simply magic.",
