@@ -226,7 +226,7 @@ def process_vertex_raycast(
     Parameters:
     - i: The index of the vertex in the BMesh
     - bm_eval: The evaluated BMesh
-    - offset_verts_hit_positions: Dictionary to store hit positions and differences
+    - offset_verts_hit_positions: Dictionary to store hit positions and offset_vectors
     - user_preferences: User-defined settings
     - target_objects: List of target objects for raycasting
     - ob_matrix_world: Object's world transformation matrix
@@ -259,15 +259,16 @@ def process_vertex_raycast(
         ob_matrix_world_inv = ob_matrix_world.inverted()
         local_hit_position = ob_matrix_world_inv @ hit_position
 
-        # Calculate the difference vector
-        difference = local_hit_position - res_v.co
-        # add the normal offset to the difference
+        # Calculate the offset_vector vector
+        offset_vector = local_hit_position - res_v.co
+        # add the normal offset to the offset_vector
         if normal_offset != 0.0:
-            difference += normal_offset * res_v.normal
+            offset_vector += normal_offset * res_v.normal
 
+        
         # Add draw data
-        l = difference.length / user_preferences.gradient_sensitivity_distance
-        if difference.length < user_preferences.max_distance:
+        l = offset_vector.length / user_preferences.gradient_sensitivity_distance
+        if offset_vector.length < user_preferences.max_distance:
             # let's not draw radical overshoots that won't be counted anyway.
             color = (min(1, l), max(0, 1 - l), 0.0, 0.1)
             draw.add_arrow(
@@ -280,10 +281,10 @@ def process_vertex_raycast(
             for f in res_v.link_faces:
                 draw.add_face(f, obj, color)
     else:
-        difference = Vector((0, 0, 0))
+        offset_vector = Vector((0, 0, 0))
 
-    # Store the hit position and difference
-    offset_verts_hit_positions[i] = (hit_position, difference)
+    # Store the hit position and offset_vector
+    offset_verts_hit_positions[i] = (hit_position, offset_vector)
 
 
 def calculate_offset(
@@ -300,7 +301,7 @@ def calculate_offset(
     """
     user_preferences = bpy.context.preferences.addons[__package__].preferences
 
-    total_difference = Vector((0, 0, 0))
+    total_offset_vector = Vector((0, 0, 0))
     results_counted = 0
     total_weight = 0
 
@@ -319,13 +320,13 @@ def calculate_offset(
 
     for range_i, i in enumerate(offset_verts_indices):
         res_v = bm_eval.verts[i]
-        hit_position, difference = offset_verts_hit_positions[i]
+        hit_position, offset_vector = offset_verts_hit_positions[i]
         if hit_position is not None:
-            if difference.length < user_preferences.max_distance:
+            if offset_vector.length < user_preferences.max_distance:
                 results_counted += 1
                 if i == v_index:
                     total_weight += 1
-                    total_difference += difference
+                    total_offset_vector += offset_vector
                 elif len(offset_verts_indices) > 1:
                     dist = distances[range_i]
                     if user_preferences.weight_algorithm == "FIRSTONLY":
@@ -341,11 +342,11 @@ def calculate_offset(
                             others_weight = dist / total_distance
 
                     total_weight += others_weight
-                    total_difference += difference * others_weight
+                    total_offset_vector += offset_vector * others_weight
 
     offset = Vector((0, 0, 0))
     if results_counted > 0 and total_weight > 0:
-        offset = total_difference / total_weight
+        offset = total_offset_vector / total_weight
     return offset
 
 
@@ -380,6 +381,15 @@ def final_topology_optimization_step(self, context, iterations=1, neighbours=1):
                 width=600,
             )
         return False
+
+    mirror_data = None
+    # apply mirror constraints
+    if user_preferences.use_mirror:
+        # check if there's a mirror modifier
+        for mod in self.object.modifiers:
+            if mod.type == "MIRROR":
+                mirror_data = utils.get_mirror_data(self.object)
+                break
 
     me = self.object.data
     bm_edit = bmesh.from_edit_mesh(me)
@@ -417,14 +427,7 @@ def final_topology_optimization_step(self, context, iterations=1, neighbours=1):
             depsgraph = bpy.context.evaluated_depsgraph_get()
             bm_eval = utils.get_evaluated_bm(self.object, depsgraph)
 
-        mirror_data = None
-        # apply mirror constraints
-        if user_preferences.use_mirror:
-            # check if there's a mirror modifier
-            for mod in self.object.modifiers:
-                if mod.type == "MIRROR":
-                    mirror_data = utils.get_mirror_data(self.object)
-                    break
+        
         if has_extras:
             # Evaluate constraints
             # TODO: inverse subdivide step should become a constraint. 
