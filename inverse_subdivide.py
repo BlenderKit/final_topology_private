@@ -343,6 +343,7 @@ def prepare_inverse_subdivide(obj, bmesh_edit, bm_eval):
 
     selected_verts = [v for v in bmesh_edit.verts if v.select]
 
+    # negihbours are all verts that are going to be influenced by the constraint.
     neighbours = get_neighbours_within_levels(selected_verts, level_subs_neighbours)
 
     offset_verts_indices = {}
@@ -365,8 +366,11 @@ def prepare_inverse_subdivide(obj, bmesh_edit, bm_eval):
                 mirror_data = utils.get_mirror_data(obj)
                 break
 
-    prep_data["offset_verts_indices"] = offset_verts_indices
-    prep_data["unique_indices"] = unique_indices
+    # set of subdivided verts that influence the vertex, list for each vertex.
+    prep_data["offset_verts_indices"] = offset_verts_indices 
+    # set of all subdivided verts that should raycast. All verts from offset_verts_indices lists, but each just once.
+    prep_data["unique_indices"] = unique_indices 
+    # set of edit mesh verts that are influenced by the constraint.
     prep_data["neighbours"] = neighbours
     prep_data["mirror_data"] = mirror_data
     prep_data["target_objects"] = target_objects
@@ -392,12 +396,14 @@ def evaluate_inverse_subdivide(
     if prep_data is None:
         return {}
 
-    offset_verts_indices = prep_data["offset_verts_indices"]
-    neighbours = prep_data["neighbours"]
-    unique_indices = prep_data["unique_indices"]
+    offset_verts_indices = prep_data["offset_verts_indices"] 
+    neighbours = prep_data["neighbours"] 
+    unique_indices = prep_data["unique_indices"] 
     mirror_data = prep_data["mirror_data"]
     target_objects = prep_data["target_objects"]
 
+    boundary_verts = set()
+    
     if attribute_name is not None and len(neighbours) > 0:
         if attribute_name in bm_edit.verts.layers.float.keys():
             attribute_layer = bm_edit.verts.layers.float[attribute_name]
@@ -405,19 +411,30 @@ def evaluate_inverse_subdivide(
             affected_indices = set()
             for v in neighbours:
                 bm_v = bm_edit.verts[v.index]
-                if bm_v[attribute_layer] > 0.001:
+                if bm_v[attribute_layer] > 0.1:
                     filtered_neighbours.append(v)
                     affected_indices.add(v.index)
+                    #iterate neighbourse once again for boundary verts.
+                    # This prevents boundary vertices from being influenced by non-affected neighbors
+                    # - we need to do this because we are using the original edit mesh position instead of subdivided
+                    # - this is a hack to make it work, but it's not the best solution.
+                    # - we should find a better solution to this problem.
+                    for n in v.link_edges:
+                        bm_n = bm_edit.verts[n.other_vert(v).index]
+                        if bm_n[attribute_layer] < 0.9:
+                            boundary_verts.add(v.index)
+                            break
             neighbours = filtered_neighbours
             
             # Filter offset_verts_indices to only include vertices affected by the constraint
-            # This prevents boundary vertices from being influenced by non-affected neighbors
+
             filtered_offset_verts_indices = {}
             for v_index in offset_verts_indices:
                 if v_index in affected_indices:
                     filtered_indices = [idx for idx in offset_verts_indices[v_index] if idx in affected_indices]
                     if filtered_indices:
                         filtered_offset_verts_indices[v_index] = filtered_indices
+                    
             offset_verts_indices = filtered_offset_verts_indices
             
             # Update unique_indices to only include affected vertices
@@ -432,9 +449,11 @@ def evaluate_inverse_subdivide(
 
     offset_verts_hit_positions = {}
     for i in unique_indices:
+        # For boundary vertices, use original edit mesh position instead of subdivided
+        use_bm = bm_edit if i in boundary_verts else bm_eval
         process_vertex_raycast(
             i,
-            bm_eval,
+            use_bm,
             offset_verts_hit_positions,
             user_preferences,
             target_objects,
