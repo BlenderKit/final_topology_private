@@ -293,37 +293,33 @@ def to_curve_verts_calculate(
                 target_distance += ratio * (vert.co - loop[0][i - 1].co).length
 
             for i_curve_offset in range(0, len(bmesh_curve.verts)):
-                last_index += direction
-
-                if last_index >= len(bmesh_curve.verts):
+                # Get the end point of current segment to check
+                check_index = last_index + direction
+                
+                if check_index >= len(bmesh_curve.verts):
                     if not loop_closed:  # Finish for not closed loops
                         end_point = eval_point(
                             curve_world_matrix @ bmesh_curve.verts[-1].co,
                             curve_snapping,
                             source_curve,
                         )
-
                         target_offsets[vert.index] = end_point - reference_co
-                        last_index -= 1  # get one step back for possible more points
                         break
-                    last_index = 0  # Wrap around for cyclic curves
-                if last_index < 0:
+                    check_index = 0  # Wrap around for cyclic curves
+                    
+                if check_index < 0:
                     if not loop_closed and i > 1:  # Finish for not closed loops
                         end_point = eval_point(
                             curve_world_matrix @ bmesh_curve.verts[0].co,
                             curve_snapping,
                             source_curve,
                         )
-
                         target_offsets[vert.index] = end_point - reference_co
-                        last_index += 1  # get one step back for possible more points
                         break
-                    last_index = (
-                        len(bmesh_curve.verts) - 1
-                    )  # Wrap around for cyclic curves
+                    check_index = len(bmesh_curve.verts) - 1  # Wrap around for cyclic curves
 
                 end_point = eval_point(
-                    curve_world_matrix @ bmesh_curve.verts[last_index].co,
+                    curve_world_matrix @ bmesh_curve.verts[check_index].co,
                     curve_snapping,
                     source_curve,
                 )
@@ -338,10 +334,13 @@ def to_curve_verts_calculate(
                     target_offsets[vert.index] = co - reference_co
                     distance_traveled = target_distance
                     start_point = co
+                    # Don't update last_index - we're still in this segment
                     break
                 else:
+                    # Move to next segment
                     distance_traveled += segment_length
                     start_point = end_point
+                    last_index = check_index
 
         # Store the offset for each vertex
 
@@ -1057,7 +1056,7 @@ def evaluate_constraints(object, bmesh_edit=None, bmesh_eval=None, inverse_subdi
                         kd=constraints_cache[i]["kd"],
                         source_curve=c.target_curve,
                     )
-                target_offsets.update(loop_offsets)
+                    target_offsets.update(loop_offsets)
 
         # evaluate inverse subdivide constraint
         elif c.constraint_type == "INVERSE_SUBDIVIDE":
