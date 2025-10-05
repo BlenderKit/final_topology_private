@@ -1049,13 +1049,16 @@ def evaluate_constraints(object, bmesh_edit=None, bmesh_eval=None, inverse_subdi
             # CURVE handles single loop - extract first
             constraint_verts_loop = constraint_verts_loops[0]
             if c.target_curve is not None and c.target_curve.type == "CURVE":
-                target_offsets = to_curve_verts_calculate(
-                    constraint_verts_loop,
-                    curve_snapping=c.curve_snapping,
-                    curve_distribution=c.curve_distribution,
-                    kd=constraints_cache[i]["kd"],
-                    source_curve=c.target_curve,
-                )
+                for loop_data in constraint_verts_loops:
+                    loop_offsets = to_curve_verts_calculate(
+                        loop_data,
+                        curve_snapping=c.curve_snapping,
+                        curve_distribution=c.curve_distribution,
+                        kd=constraints_cache[i]["kd"],
+                        source_curve=c.target_curve,
+                    )
+                target_offsets.update(loop_offsets)
+
         # evaluate inverse subdivide constraint
         elif c.constraint_type == "INVERSE_SUBDIVIDE":
             from . import inverse_subdivide
