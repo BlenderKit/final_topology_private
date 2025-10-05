@@ -1091,6 +1091,7 @@ def evaluate_constraints(object, bmesh_edit=None, bmesh_eval=None, inverse_subdi
                     bmesh_eval,
                     constraint_prep,
                     attribute_name=c.attribute_name,
+                    normal_offset=c.invsubdiv_normal_offset,
                 )
         
         # evaluate slide optimize constraint

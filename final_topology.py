@@ -123,6 +123,7 @@ def final_topology_optimization_step(self, context, iterations=1, neighbours=1):
                 bm_edit,
                 bm_eval,
                 inverse_subdivide_prep,
+                normal_offset=self.object.final_topology.normal_offset,
             )
             utils.move_verts_to_targets(bm_edit, target_offsets, weight=user_preferences.step_weight)
 

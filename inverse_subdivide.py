@@ -384,6 +384,7 @@ def evaluate_inverse_subdivide(
     bm_eval,
     prep_data,
     attribute_name=None,
+    normal_offset=0.0,
 ):
     """
     Evaluate inverse subdivide for one iteration.
@@ -458,7 +459,7 @@ def evaluate_inverse_subdivide(
             user_preferences,
             target_objects,
             obj,
-            obj.final_topology.normal_offset,
+            normal_offset,
         )
 
     target_offsets = {}
