@@ -1009,72 +1009,45 @@ def evaluate_constraints(object, bmesh_edit=None, bmesh_eval=None, inverse_subdi
         if len(constraint_verts_loops_edit) == 0:
             continue
 
-        # Handle multi-loop format: [[verts1, is_circular1], [verts2, is_circular2], ...]
-        # For single-loop constraints (CURVE, PLANE_FIXED), unwrap to old format [verts, is_circular]
-        is_multi_loop = (
-            len(constraint_verts_loops_edit) > 0
-            and isinstance(constraint_verts_loops_edit[0], list)
-            and len(constraint_verts_loops_edit[0]) == 2
-            and isinstance(constraint_verts_loops_edit[0][0], list)
-        )
-        
-        if is_multi_loop and c.constraint_type in ["PLANE_FIXED", "CURVE"]:
-            # These constraints expect single loop format
-            constraint_verts_loop_edit = constraint_verts_loops_edit[0]
-        elif is_multi_loop:
-            # Multi-loop constraints (SLIDE_OPTIMIZE, PLANE)
-            constraint_verts_loop_edit = constraint_verts_loops_edit
+        # All edge-based constraints receive multi-loop format: [[verts1, is_circular1], [verts2, is_circular2], ...]
+        # Ensure it's always in multi-loop format
+        if isinstance(constraint_verts_loops_edit[0], list) and len(constraint_verts_loops_edit[0]) == 2:
+            # Already multi-loop format
+            constraint_verts_loops = constraint_verts_loops_edit
         else:
-            # Old format compatibility
-            constraint_verts_loop_edit = constraint_verts_loops_edit
+            # Convert single loop to multi-loop format
+            constraint_verts_loops = [constraint_verts_loops_edit]
 
         # Handle subdivision
         if c.works_on_subdivision:
-            if is_multi_loop and c.constraint_type in ["SLIDE_OPTIMIZE", "PLANE"]:
-                # Convert all loops to subdivided mesh
-                constraint_verts_loop = []
-                for loop_data in constraint_verts_loop_edit:
-                    new_verts = []
-                    for v in loop_data[0]:
-                        new_verts.append(bmesh_eval.verts[v.index])
-                    constraint_verts_loop.append([new_verts, loop_data[1]])
-            else:
-                # Single loop format
-                constraint_verts_loop = [[], constraint_verts_loop_edit[1]]
-                for v in constraint_verts_loop_edit[0]:
-                    constraint_verts_loop[0].append(bmesh_eval.verts[v.index])
-        else:
-            constraint_verts_loop = constraint_verts_loop_edit
+            constraint_verts_loops_subdiv = []
+            for loop_data in constraint_verts_loops:
+                new_verts = []
+                for v in loop_data[0]:
+                    new_verts.append(bmesh_eval.verts[v.index])
+                constraint_verts_loops_subdiv.append([new_verts, loop_data[1]])
+            constraint_verts_loops = constraint_verts_loops_subdiv
         # evaluate plane constraint
         if c.constraint_type == "PLANE":
-            # Handle multi-loop format
-            if is_multi_loop:
-                for loop_data in constraint_verts_loop:
-                    if len(loop_data[0]) > 2:
-                        loop_offsets = utils.flatten_verts_calculate(
-                            loop_data[0], slide=False, method="best_fit"
-                        )
-                        target_offsets.update(loop_offsets)
-            else:
-                # Single loop format
-                if len(constraint_verts_loop[0]) > 2:
-                    target_offsets = utils.flatten_verts_calculate(
-                        constraint_verts_loop[0], slide=False, method="best_fit"
+            # PLANE constraint handles loops internally based on fix_center and fix_normal
+            # Shared center, independent orientations
+            for loop_data in constraint_verts_loops:
+                if len(loop_data[0]) > 2:
+                    loop_offsets = utils.flatten_verts_calculate(
+                        loop_data[0],
+                        slide=False,
+                        center=Vector(c.center),
+                        normal=Vector(c.normal),
+                        fix_center=c.fix_center,
+                        fix_normal=c.fix_normal,
                     )
-        # evaluate fixed plane constraint
-        elif c.constraint_type == "PLANE_FIXED":
-            if len(constraint_verts_loop[0]) > 2:
-                target_offsets = utils.flatten_verts_calculate(
-                    constraint_verts_loop[0],
-                    slide=False,
-                    method="fixed",
-                    center=Vector(c.center),
-                    normal=Vector(c.normal),
-                )
-            world_matrix = object.matrix_world
+                    target_offsets.update(loop_offsets)
+                
 
         # evaluate curve constraint
         elif c.constraint_type == "CURVE":
+            # CURVE handles single loop - extract first
+            constraint_verts_loop = constraint_verts_loops[0]
             if c.target_curve is not None and c.target_curve.type == "CURVE":
                 target_offsets = to_curve_verts_calculate(
                     constraint_verts_loop,
@@ -1087,19 +1060,40 @@ def evaluate_constraints(object, bmesh_edit=None, bmesh_eval=None, inverse_subdi
         elif c.constraint_type == "INVERSE_SUBDIVIDE":
             from . import inverse_subdivide
 
-            if len(inverse_subdivide_prep["target_objects"]) > 0:
+            # Get constraint-specific target objects and normal offset.
+            constraint_target_objects = []
+            if c.use_object_or_collection == "COLLECTION":
+                if c.invsubdiv_target_collection:
+                    for ob in c.invsubdiv_target_collection.objects:
+                        if ob.type == "MESH" and ob.visible_get():
+                            constraint_target_objects.append(ob)
+            elif c.use_object_or_collection == "OBJECT":
+                if c.invsubdiv_target_object and c.invsubdiv_target_object.type == "MESH":
+                    constraint_target_objects.append(c.invsubdiv_target_object)
+            else:  # SCENE
+                constraint_target_objects = [
+                    obj for obj in bpy.context.scene.objects
+                    if (obj.visible_get() and obj.type == "MESH" and obj != object)
+                ]
+
+            if len(constraint_target_objects) > 0:
+                # Create constraint-specific prep data
+                constraint_prep = inverse_subdivide_prep.copy()
+                constraint_prep["target_objects"] = constraint_target_objects
+                constraint_prep["normal_offset"] = c.invsubdiv_normal_offset
 
                 target_offsets = inverse_subdivide.evaluate_inverse_subdivide(
                     object,
                     bmesh_edit,
                     bmesh_eval,
-                    inverse_subdivide_prep,
+                    constraint_prep,
                     attribute_name=c.attribute_name,
                 )
         
         # evaluate slide optimize constraint
         elif c.constraint_type == "SLIDE_OPTIMIZE":
-            target_offsets = slide_optimize_calculate(constraint_verts_loop)
+            # SLIDE_OPTIMIZE handles multi-loop format
+            target_offsets = slide_optimize_calculate(constraint_verts_loops)
 
         # move vertices to new locations
         # this has already weighting which might be a good idea with many constraints working together.
@@ -1211,6 +1205,32 @@ def update_constraint_data(self, context):
     constraints_cache = []
 
 
+def update_plane_fix_flags(self, context):
+    """Recalculate center/normal when fix flags are toggled"""
+    if self.constraint_type != "PLANE":
+        return
+    
+    # Only recalculate if we're enabling a fix flag
+    if not (self.fix_center or self.fix_normal):
+        return
+    
+    # Get the constraint's vertices
+    mesh = context.active_object.data
+    bm = bmesh.from_edit_mesh(mesh)
+    
+    # Get vertices from attribute
+    if not self.attribute_name or self.attribute_name not in bm.verts.layers.float:
+        return
+    
+    attribute_layer = bm.verts.layers.float[self.attribute_name]
+    verts = [v for v in bm.verts if v[attribute_layer] == 1.0]
+    
+    if len(verts) > 2:
+        center, normal = utils.estimate_best_fit_plane(verts, "best_fit")
+        self.center = center
+        self.normal = normal
+
+
 def filter_curves(self, object):
     return object.type == "CURVE"
 
@@ -1222,7 +1242,6 @@ class CustomConstraint(bpy.types.PropertyGroup):
         default="PLANE",
         items=[
             ("PLANE", "Plane", "Planar constraint", "MESH_PLANE", 0),
-            ("PLANE_FIXED", "Plane Fixed", "Planar constraint fixed", "MESH_PLANE", 1),
             ("CURVE", "Curve", "Curve constraint", "CURVE_DATA", 2),
             (
                 "INVERSE_SUBDIVIDE",
@@ -1249,6 +1268,18 @@ class CustomConstraint(bpy.types.PropertyGroup):
         ],
         update=update_constraint_data,
     )
+    fix_center: bpy.props.BoolProperty(
+        name="Fix Center",
+        default=False,
+        description="Fix the plane center position",
+        update=update_plane_fix_flags,
+    )
+    fix_normal: bpy.props.BoolProperty(
+        name="Fix Normal",
+        default=False,
+        description="Fix the plane normal/rotation",
+        update=update_plane_fix_flags,
+    )
     enabled: bpy.props.BoolProperty(name="Enabled", default=True)
     works_on_subdivision: bpy.props.BoolProperty(
         name="Works on Subdivision",
@@ -1261,6 +1292,34 @@ class CustomConstraint(bpy.types.PropertyGroup):
     color: bpy.props.FloatVectorProperty(
         name="Color", size=3, default=(1.0, 0.0, 0.0), subtype="COLOR"
     )
+    
+    # Inverse subdivide constraint properties
+    use_object_or_collection: bpy.props.EnumProperty(
+        name="Use Object or Collection",
+        items=[
+            ("SCENE", "Scene", "All evaluated objects in scene"),
+            ("OBJECT", "Object", "Single object"),
+            ("COLLECTION", "Collection", "Collection"),
+        ],
+        default="SCENE",
+        description="Snap to",
+    )
+    invsubdiv_target_object: bpy.props.PointerProperty(
+        type=bpy.types.Object, name="Target Object"
+    )
+    invsubdiv_target_collection: bpy.props.PointerProperty(
+        type=bpy.types.Collection, name="Target Collection"
+    )
+    invsubdiv_normal_offset: bpy.props.FloatProperty(
+        name="Normal Offset",
+        default=0.0,
+        soft_min=-0.2,
+        soft_max=0.2,
+        description="Normal offset",
+        unit="LENGTH",
+    )
+    
+    # Curve constraint properties
     target_curve: bpy.props.PointerProperty(
         type=bpy.types.Object,
         name="Target Curve",
@@ -1342,16 +1401,41 @@ class VIEW3D_PT_final_topology_constraints(Panel):
             ac = mesh.ft_custom_constraints[mesh.ft_custom_constraints_index]
             layout.prop(ac, "name")
             layout.prop(ac, "constraint_type")
-            layout.prop(ac, "works_on_subdivision")
+            if ac.constraint_type != "INVERSE_SUBDIVIDE":
+                layout.prop(ac, "works_on_subdivision")
 
-            if ac.constraint_type in ["PLANE_FIXED", "CIRCLE"]:
-                layout.prop(ac, "center")
-                layout.prop(ac, "normal")
+            if ac.constraint_type == "PLANE":
+                layout.prop(ac, "fix_center")
+                layout.prop(ac, "fix_normal")
+                if ac.fix_center or ac.fix_normal:
+                    if ac.fix_center:
+                        layout.prop(ac, "center")
+                    if ac.fix_normal:
+                        layout.prop(ac, "normal")
 
             if ac.constraint_type == "CURVE":
                 layout.prop(ac, "target_curve")
                 layout.prop(ac, "curve_snapping")
                 layout.prop(ac, "curve_distribution")
+            
+            if ac.constraint_type == "INVERSE_SUBDIVIDE":
+                layout.label(text="Snap to")
+                if bpy.data.objects.get("FROZEN_MESH_STATE") is not None:
+                    layout.operator(
+                        "mesh.freeze_shape", text="Unfreeze shape", depress=True, icon="FREEZE"
+                    )
+                else:
+                    layout.operator(
+                        "mesh.freeze_shape", text="Freeze Shape", depress=False, icon="FREEZE"
+                    )
+                    row = layout.row()
+                    row.prop(ac, "use_object_or_collection", text="")
+                    if ac.use_object_or_collection == "OBJECT":
+                        row.prop(ac, "invsubdiv_target_object", text="")
+                    elif ac.use_object_or_collection == "COLLECTION":
+                        row.prop(ac, "invsubdiv_target_collection", text="")
+                
+                layout.prop(ac, "invsubdiv_normal_offset", text="Normal Offset")
 
 
 class VIEW3D_PT_final_topology_extra_operators(Panel):
@@ -1467,7 +1551,7 @@ class AddSelectionToConstraintOperator(bpy.types.Operator):
         return {"FINISHED"}
 
 def get_constraint_domain_type(constraint_type):
-    if constraint_type in ["PLANE", "PLANE_FIXED", "CURVE", "SLIDE_OPTIMIZE"]:
+    if constraint_type in ["PLANE", "CURVE", "SLIDE_OPTIMIZE"]:
         return "EDGE"
     elif constraint_type == "INVERSE_SUBDIVIDE":
         return "POINT"
@@ -1560,28 +1644,43 @@ class AddConstraintOperator(bpy.types.Operator):
         # Create a new constraint
         new_constraint = mesh.ft_custom_constraints.add()
         new_constraint.name = self.name
-        new_constraint.constraint_type = self.constraint_type
+        
+        # Convert PLANE_FIXED to PLANE with fix flags
+        actual_type = "PLANE" if self.constraint_type == "PLANE_FIXED" else self.constraint_type
+        new_constraint.constraint_type = actual_type
         new_constraint.works_on_subdivision = self.works_on_subdivision
 
-        # new_constraint.center = self.center
-        # new_constraint.normal = self.normal
         attribute_name = f"ft_constraint"
 
         # Set the newly added constraint as the active one
         mesh.ft_custom_constraints_index = len(mesh.ft_custom_constraints) - 1
+        
         if self.constraint_type == "PLANE_FIXED" or self.constraint_type == "PLANE":
-            # get fixed plane from selection for constraints
-
+            # Calculate plane from selection
             center, normal = utils.estimate_best_fit_plane(selected_verts, "best_fit")
             new_constraint.center = center
             new_constraint.normal = normal
+            
+            # Set fix flags for PLANE_FIXED
+            if self.constraint_type == "PLANE_FIXED":
+                new_constraint.fix_center = True
+                new_constraint.fix_normal = True
+        
         if self.constraint_type == "CURVE":
-            # get fixed plane from selection for constraints
+            # Calculate plane from selection for curve
             center, normal = utils.estimate_best_fit_plane(selected_verts, "best_fit")
             new_constraint.center = center
             new_constraint.normal = normal
+        
+        if self.constraint_type == "INVERSE_SUBDIVIDE":
+            # Copy settings from object-level inverse subdivide settings
+            obj_props = context.active_object.final_topology
+            new_constraint.use_object_or_collection = obj_props.use_object_or_collection
+            new_constraint.invsubdiv_target_object = obj_props.target_object
+            new_constraint.invsubdiv_target_collection = obj_props.target_collection
+            new_constraint.invsubdiv_normal_offset = obj_props.normal_offset
 
-        domain = get_constraint_domain_type(self.constraint_type)
+        domain = get_constraint_domain_type(actual_type)
         attribute_name = fill_attribute_with_selection(
             attribute_name, mesh, type="FLOAT", domain=domain, new=True
         )
@@ -1653,10 +1752,7 @@ class CUSTOM_UL_constraint_list(bpy.types.UIList):
         # Use layout to display the constraint properties
         # layout.label(text=constraint.name)
 
-        layout.prop(constraint, "name", text="", emboss=False)
         if constraint.constraint_type == "PLANE":
-            icon = "MESH_PLANE"
-        elif constraint.constraint_type == "PLANE_FIXED":
             icon = "MESH_PLANE"
         elif constraint.constraint_type == "CURVE":
             icon = "CURVE_DATA"
@@ -1667,7 +1763,8 @@ class CUSTOM_UL_constraint_list(bpy.types.UIList):
         elif constraint.constraint_type == "SLIDE_OPTIMIZE":
             icon = "DRIVER_ROTATIONAL_DIFFERENCE"
 
-        layout.label(icon=icon)
+        layout.prop(constraint, "name", text="", emboss=False, icon=icon)
+        
         if constraint.enabled:
             layout.prop(
                 constraint, "enabled", text="", emboss=False, icon="RESTRICT_VIEW_OFF"

@@ -281,26 +281,38 @@ def inverse_subdivide_UI_draw(self, context):
     active_obj = bpy.context.active_object
     layout = self.layout
 
+    # Check if any INVERSE_SUBDIVIDE constraints exist
+    has_invsubdiv_constraint = False
+    if hasattr(active_obj.data, 'ft_custom_constraints'):
+        for constraint in active_obj.data.ft_custom_constraints:
+            if constraint.constraint_type == "INVERSE_SUBDIVIDE":
+                has_invsubdiv_constraint = True
+                break
 
     layout.separator()
-    layout.label(text="Snap to")
-    if bpy.data.objects.get("FROZEN_MESH_STATE") is not None:
-        layout.operator(
-            FreezeShape.bl_idname, text="Unfreeze shape", depress=True, icon="FREEZE"
-        )
+    
+    # Hide freeze shape and target settings if constraint exists
+    if has_invsubdiv_constraint:
+        layout.label(text="Target settings are in constraint.")
+        
+    if not has_invsubdiv_constraint:
+        layout.label(text="Snap to")
+        if bpy.data.objects.get("FROZEN_MESH_STATE") is not None:
+            layout.operator(
+                FreezeShape.bl_idname, text="Unfreeze shape", depress=True, icon="FREEZE"
+            )
+        else:
+            layout.operator(
+                FreezeShape.bl_idname, text="Freeze Shape", depress=False, icon="FREEZE"
+            )
+            row = layout.row()
+            row.prop(active_obj.final_topology, "use_object_or_collection", text="")
+            if active_obj.final_topology.use_object_or_collection == "OBJECT":
+                row.prop(active_obj.final_topology, "target_object", text="")
+            elif active_obj.final_topology.use_object_or_collection == "COLLECTION":
+                row.prop(active_obj.final_topology, "target_collection", text="")
 
-    else:
-        layout.operator(
-            FreezeShape.bl_idname, text="Freeze Shape", depress=False, icon="FREEZE"
-        )
-        row = layout.row()
-        row.prop(active_obj.final_topology, "use_object_or_collection", text="")
-        if active_obj.final_topology.use_object_or_collection == "OBJECT":
-            row.prop(active_obj.final_topology, "target_object", text="")
-        elif active_obj.final_topology.use_object_or_collection == "COLLECTION":
-            row.prop(active_obj.final_topology, "target_collection", text="")
-
-    layout.prop(active_obj.final_topology, "normal_offset", text="Normal Offset")
+        layout.prop(active_obj.final_topology, "normal_offset", text="Normal Offset")
     if has_extras:
         layout.separator()
         layout.prop(user_preferences, "iterations")

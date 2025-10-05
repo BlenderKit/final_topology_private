@@ -135,13 +135,16 @@ def get_attribute_elements(
             if val == 1.0:
                 draw_elements.append(vert)
     elif domain == "EDGE":
+
         attribute_layer = bm.edges.layers.float[constraint.attribute_name]
         for edge in bm.edges:
             val = edge[attribute_layer]
             if val == 1.0:
                 draw_elements.append(edge)
         edge_keys = [edgekey(edge) for edge in draw_elements]
-        # use looptools to sort the edges into loops
+        # use looptools to sort the edges into loops 
+        # - this makes it compatible with looptools and we can potentially 
+        # use looptools for other constraints as well.
         loops = get_connected_selections(edge_keys)
 
     elif domain == "FACE":
@@ -335,16 +338,23 @@ def estimate_best_fit_plane(verts, method="best_fit"):
 
 
 def flatten_verts_calculate(
-    verts, method="best_fit", slide=False, center=None, normal=None
+    verts, slide=False, center=None, normal=None, fix_center=False, fix_normal=False
 ):
-    """Calculate new positions for vertices to be flattened, Return a dictionary with the new positions"""
+    """Calculate new positions for vertices to be flattened, Return a dictionary with the new positions
+    
+    Args:
+        fix_center: If True, use provided center; otherwise calculate from verts
+        fix_normal: If True, use provided normal; otherwise calculate from verts
+    """
     target_offsets = {}
-    # Estimate the best fit plane
-    if center is None or normal is None:
-        center, normal = estimate_best_fit_plane(verts, method)
-    else:
-        # normalize normal, user might edit it
-        normal = normal.normalized()
+    
+    # Calculate best-fit plane
+    estimated_center, estimated_normal = estimate_best_fit_plane(verts, "best_fit")
+
+    if not fix_normal:
+        normal = estimated_normal
+    if not fix_center:
+        center = estimated_center
 
     # Define a function to get the intersection point of a line with the plane
     def line_plane_intersection(line_start, line_end, plane_point, plane_normal):
@@ -352,6 +362,7 @@ def flatten_verts_calculate(
         d = (plane_point - line_start).dot(plane_normal) / line_dir.dot(plane_normal)
         return line_start + d * line_dir
 
+    
     if slide:
         for vert in verts:
             # For each vertex, find the closest edge intersection with the plane
@@ -412,7 +423,9 @@ def flatten_verts_calculate(
 
 def flatten_verts(verts, method="best_fit", slide=False, center=None, normal=None):
     # Estimate the best fit plane
-    target_offsets = flatten_verts_calculate(verts, method, slide, center, normal)
+    fix_center = center is not None
+    fix_normal = normal is not None
+    target_offsets = flatten_verts_calculate(verts, slide, center, normal, fix_center, fix_normal)
     # Move the vertices to the new positions
     for vert in verts:
         vert.co = target_offsets[vert.index]
@@ -473,9 +486,10 @@ def evaluate_mirror_constraints(object, bmesh_edit=None, bmesh_eval=None):
                 target_offsets = flatten_verts_calculate(
                     verts,
                     slide=False,
-                    method="fixed",
                     center=plane_co,
                     normal=mirror_plane,
+                    fix_center=True,
+                    fix_normal=True,
                 )
                 move_verts_to_targets(bmesh_edit, target_offsets, weight=0.5)
 

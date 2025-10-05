@@ -402,11 +402,28 @@ def evaluate_inverse_subdivide(
         if attribute_name in bm_edit.verts.layers.float.keys():
             attribute_layer = bm_edit.verts.layers.float[attribute_name]
             filtered_neighbours = []
+            affected_indices = set()
             for v in neighbours:
                 bm_v = bm_edit.verts[v.index]
                 if bm_v[attribute_layer] > 0.001:
                     filtered_neighbours.append(v)
+                    affected_indices.add(v.index)
             neighbours = filtered_neighbours
+            
+            # Filter offset_verts_indices to only include vertices affected by the constraint
+            # This prevents boundary vertices from being influenced by non-affected neighbors
+            filtered_offset_verts_indices = {}
+            for v_index in offset_verts_indices:
+                if v_index in affected_indices:
+                    filtered_indices = [idx for idx in offset_verts_indices[v_index] if idx in affected_indices]
+                    if filtered_indices:
+                        filtered_offset_verts_indices[v_index] = filtered_indices
+            offset_verts_indices = filtered_offset_verts_indices
+            
+            # Update unique_indices to only include affected vertices
+            unique_indices = set()
+            for v_index in filtered_offset_verts_indices:
+                unique_indices.update(filtered_offset_verts_indices[v_index])
 
     if len(neighbours) == 0:
         return {}
