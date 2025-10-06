@@ -273,7 +273,7 @@ def final_topology_operators_draw(self, context):
     if user_preferences.always_on:
         layout.prop(user_preferences, "use_timer", toggle=False, icon="TIME")
 
-def inverse_subdivide_UI_draw(self, context):
+def final_topology_settings_UI_draw(self, context):
     if not poll_final_topology(self, context):
         return
 
@@ -288,40 +288,42 @@ def inverse_subdivide_UI_draw(self, context):
             if constraint.constraint_type == "INVERSE_SUBDIVIDE":
                 has_invsubdiv_constraint = True
                 break
-
-    layout.separator()
     
+    box = layout.box()
+    box.label(text="Optimization loop settings:")
+    box.prop(user_preferences, "iterations")
+    box.prop(user_preferences, "step_weight")
+
+    box = layout.box()
+    box.label(text="Inverse Subdivide settings:")
     # Hide freeze shape and target settings if constraint exists
     if has_invsubdiv_constraint:
-        layout.label(text="Target settings are in constraint.")
+        box.label(text="Target settings are in constraint.")
         
     if not has_invsubdiv_constraint:
-        layout.label(text="Snap to")
+        box.label(text="Snap to")
         if bpy.data.objects.get("FROZEN_MESH_STATE") is not None:
-            layout.operator(
+            box.operator(
                 FreezeShape.bl_idname, text="Unfreeze shape", depress=True, icon="FREEZE"
             )
         else:
-            layout.operator(
+            box.operator(
                 FreezeShape.bl_idname, text="Freeze Shape", depress=False, icon="FREEZE"
             )
-            row = layout.row()
+            row = box.row()
             row.prop(active_obj.final_topology, "use_object_or_collection", text="")
             if active_obj.final_topology.use_object_or_collection == "OBJECT":
                 row.prop(active_obj.final_topology, "target_object", text="")
             elif active_obj.final_topology.use_object_or_collection == "COLLECTION":
                 row.prop(active_obj.final_topology, "target_collection", text="")
 
-        layout.prop(active_obj.final_topology, "normal_offset", text="Normal Offset")
+        box.prop(active_obj.final_topology, "normal_offset", text="Normal Offset")
     if has_extras:
-        layout.separator()
-        layout.prop(user_preferences, "iterations")
-        layout.prop(user_preferences, "neighbours")
-    layout.prop(user_preferences, "max_distance")
+        box.prop(user_preferences, "neighbours")
+    box.prop(user_preferences, "max_distance")
     if has_extras:
-        layout.prop(user_preferences, "weight_algorithm")
-    layout.prop(user_preferences, "use_mirror")
-    layout.prop(user_preferences, "step_weight")
+        box.prop(user_preferences, "weight_algorithm")
+    box.prop(user_preferences, "use_mirror")
 
 
 class VIEW3D_PT_final_topology_overlays(Panel):
@@ -364,18 +366,18 @@ class VIEW3D_PT_final_topology_overlays(Panel):
             )
 
 
-class VIEW3D_PT_final_topology_inverse_subdivide(Panel):
+class VIEW3D_PT_final_topology_settings(Panel):
     bl_category = "Edit"
-    bl_idname = "VIEW3D_PT_final_topology_inverse_subdivide"
+    bl_idname = "VIEW3D_PT_final_topology_settings"
     bl_space_type = "VIEW_3D"
     bl_region_type = "UI"
-    bl_label = "Inverse Subdivide settings"
+    bl_label = "Settings"
     bl_parent_id = "VIEW3D_PT_final_topology_editmode"
     bl_options = {"DEFAULT_CLOSED"}
 
     def draw(self, context):
         layout = self.layout
-        inverse_subdivide_UI_draw(self, context)
+        final_topology_settings_UI_draw(self, context)
 
 
 # separate UI panel in the side bar
@@ -465,7 +467,7 @@ classes = [
     InverseSubdivideAddonPreferences,
     PopupDialog,
     VIEW3D_PT_final_topology_editmode,
-    VIEW3D_PT_final_topology_inverse_subdivide,
+    VIEW3D_PT_final_topology_settings,
     VIEW3D_PT_final_topology_objectmode,
     VIEW3D_PT_final_topology_overlays,
 ]
