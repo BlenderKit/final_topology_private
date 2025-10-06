@@ -296,44 +296,47 @@ class finalTopologyModal(Operator):
         return {"RUNNING_MODAL"}
 
 
-def create_freeze_mesh_object():
+def create_freeze_mesh_object(freeze_name="FROZEN_MESH_STATE", constraint=None):
     orig_ob = bpy.context.active_object
     orig_mode = bpy.context.mode
     bpy.ops.object.mode_set(mode="OBJECT")
     bpy.ops.object.duplicate()
     freeze_mesh_object = bpy.context.active_object
-    freeze_mesh_object.name = "FROZEN_MESH_STATE"
-    freeze_mesh_object.name = (
-        "FROZEN_MESH_STATE"  # double setting name removes the .001s
-    )
+    freeze_mesh_object.name = freeze_name
+    freeze_mesh_object.name = freeze_name
 
     for m in freeze_mesh_object.modifiers:
         if m.type != "MIRROR":
             m.show_viewport = False
             m.show_render = False
-    # freeze_mesh_object.modifiers.clear()
-    # hide the object
-    # freeze_mesh_object.hide_viewport = True
-    freeze_mesh_object.hide_set(True)
 
+    freeze_mesh_object.hide_set(True)
     freeze_mesh_object.hide_render = True
 
     m = freeze_mesh_object.modifiers.new("Subdivision", "SUBSURF")
     m.levels = 5
     utils.activate_object(orig_ob)
     bpy.ops.object.mode_set(mode="EDIT")
-    orig_ob.final_topology.use_object_or_collection = "OBJECT"
-    orig_ob.final_topology.target_object = freeze_mesh_object
+    
+    if constraint is not None:
+        constraint.use_object_or_collection = "OBJECT"
+        constraint.invsubdiv_target_object = freeze_mesh_object
+    else:
+        orig_ob.final_topology.use_object_or_collection = "OBJECT"
+        orig_ob.final_topology.target_object = freeze_mesh_object
     return freeze_mesh_object
 
 
-def delete_frozen_mesh():
+def delete_frozen_mesh(freeze_name="FROZEN_MESH_STATE", constraint=None):
     active_obj = bpy.context.active_object
-    object = bpy.data.objects.get("FROZEN_MESH_STATE")
+    object = bpy.data.objects.get(freeze_name)
     if object is not None:
         bpy.data.objects.remove(object)
     if active_obj:
-        active_obj.final_topology.use_object_or_collection = "SCENE"
+        if constraint is not None:
+            constraint.use_object_or_collection = "SCENE"
+        else:
+            active_obj.final_topology.use_object_or_collection = "SCENE"
 
 
 class FreezeShape(bpy.types.Operator):
@@ -346,12 +349,24 @@ class FreezeShape(bpy.types.Operator):
     )
     bl_options = {"REGISTER", "UNDO"}
 
+    constraint_index: bpy.props.IntProperty(default=-1)
+
     def execute(self, context):
-        object = bpy.data.objects.get("FROZEN_MESH_STATE")
-        if object is not None:
-            delete_frozen_mesh()
+        active_obj = context.active_object
+        constraint = None
+        
+        if self.constraint_index >= 0 and hasattr(active_obj.data, 'ft_custom_constraints'):
+            if self.constraint_index < len(active_obj.data.ft_custom_constraints):
+                constraint = active_obj.data.ft_custom_constraints[self.constraint_index]
+                freeze_name = f"FROZEN_MESH_STATE_{active_obj.name}_{constraint.name}"
         else:
-            create_freeze_mesh_object()
+            freeze_name = f"FROZEN_MESH_STATE_{active_obj.name}"
+        
+        object = bpy.data.objects.get(freeze_name)
+        if object is not None:
+            delete_frozen_mesh(freeze_name, constraint)
+        else:
+            create_freeze_mesh_object(freeze_name, constraint)
         return {"FINISHED"}
 
 

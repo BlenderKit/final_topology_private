@@ -1423,14 +1423,18 @@ class VIEW3D_PT_final_topology_constraints(Panel):
             
             if ac.constraint_type == "INVERSE_SUBDIVIDE":
                 layout.label(text="Snap to")
-                if bpy.data.objects.get("FROZEN_MESH_STATE") is not None:
-                    layout.operator(
+                active_obj = context.active_object
+                freeze_name = f"FROZEN_MESH_STATE_{active_obj.name}_{ac.name}"
+                if bpy.data.objects.get(freeze_name) is not None:
+                    op = layout.operator(
                         "mesh.freeze_shape", text="Unfreeze shape", depress=True, icon="FREEZE"
                     )
+                    op.constraint_index = mesh.ft_custom_constraints_index
                 else:
-                    layout.operator(
+                    op = layout.operator(
                         "mesh.freeze_shape", text="Freeze Shape", depress=False, icon="FREEZE"
                     )
+                    op.constraint_index = mesh.ft_custom_constraints_index
                     row = layout.row()
                     row.prop(ac, "use_object_or_collection", text="")
                     if ac.use_object_or_collection == "OBJECT":
@@ -1719,10 +1723,9 @@ class DeleteConstraintOperator(bpy.types.Operator):
     bl_options = {"REGISTER", "UNDO"}
 
     def execute(self, context):
-        # Access the mesh data block
         mesh = context.active_object.data
+        active_obj = context.active_object
 
-        # Ensure there are constraints to delete
         if (
             mesh.ft_custom_constraints_index >= 0
             and mesh.ft_custom_constraints_index < len(mesh.ft_custom_constraints)
@@ -1730,11 +1733,15 @@ class DeleteConstraintOperator(bpy.types.Operator):
             # Remove the active constraint
             constraint = mesh.ft_custom_constraints[mesh.ft_custom_constraints_index]
 
+            if constraint.constraint_type == "INVERSE_SUBDIVIDE":
+                freeze_name = f"FROZEN_MESH_STATE_{active_obj.name}_{constraint.name}"
+                freeze_object = bpy.data.objects.get(freeze_name)
+                if freeze_object is not None:
+                    bpy.data.objects.remove(freeze_object)
+
             attribute = mesh.attributes.get(constraint.attribute_name)
-            try:
+            if attribute is not None:
                 mesh.attributes.remove(attribute)
-            except:
-                print("Attribute for deleting not found")
 
             mesh.ft_custom_constraints.remove(mesh.ft_custom_constraints_index)
 

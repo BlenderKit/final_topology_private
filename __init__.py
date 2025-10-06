@@ -302,14 +302,17 @@ def final_topology_settings_UI_draw(self, context):
         
     if not has_invsubdiv_constraint:
         box.label(text="Snap to")
-        if bpy.data.objects.get("FROZEN_MESH_STATE") is not None:
-            box.operator(
+        object_freeze_name = f"FROZEN_MESH_STATE_{active_obj.name}"
+        if bpy.data.objects.get(object_freeze_name) is not None:
+            op = box.operator(
                 FreezeShape.bl_idname, text="Unfreeze shape", depress=True, icon="FREEZE"
             )
+            op.constraint_index = -1
         else:
-            box.operator(
+            op = box.operator(
                 FreezeShape.bl_idname, text="Freeze Shape", depress=False, icon="FREEZE"
             )
+            op.constraint_index = -1
             row = box.row()
             row.prop(active_obj.final_topology, "use_object_or_collection", text="")
             if active_obj.final_topology.use_object_or_collection == "OBJECT":
