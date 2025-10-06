@@ -6,7 +6,7 @@ from mathutils import Vector
 
 from . import draw, utils
 
-def get_target_objects(self):
+def get_target_objects():
     active_obj = bpy.context.active_object
     if not active_obj:
         return []
@@ -27,7 +27,7 @@ def get_target_objects(self):
         target_objects = [
             obj
             for obj in bpy.context.scene.objects
-            if (obj.visible_get() and obj.type == "MESH" and obj != self.object)
+            if (obj.visible_get() and obj.type == "MESH" and obj != active_obj)
         ]
     return target_objects
 
@@ -330,9 +330,6 @@ def prepare_inverse_subdivide(obj, bmesh_edit, bm_eval):
     level_subs_neighbours = 1 * 2 ** (s_levels - 1)
     prep_data["level_subs_neighbours"] = level_subs_neighbours
 
-    target_objects = get_target_objects(obj)
-    if len(target_objects) == 0:
-        return False
 
     mirror_data = None
     if user_preferences.use_mirror:
@@ -373,7 +370,13 @@ def prepare_inverse_subdivide(obj, bmesh_edit, bm_eval):
     # set of edit mesh verts that are influenced by the constraint.
     prep_data["neighbours"] = neighbours
     prep_data["mirror_data"] = mirror_data
-    prep_data["target_objects"] = target_objects
+    # get target objects only if there are no constraints, 
+    # otherwise constraints do get those themselves
+    if len(obj.data.ft_custom_constraints) == 0:
+        target_objects = get_target_objects()
+        if len(target_objects) == 0:
+            return False
+        prep_data["target_objects"] = target_objects
     
     return prep_data
 
