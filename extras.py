@@ -251,6 +251,7 @@ def to_curve_verts_calculate(
                 )
 
                 # estimate which direction to go by angle - this seems to be wrong by now
+                
                 angle1 = (reference_co1 - reference_co).angle(next_point - co)
                 angle2 = (reference_co2 - reference_co).angle(next_point - co)
                 # print(angle1, angle2)
@@ -966,6 +967,34 @@ def build_kd_curve_cache(source_curve, endpoints_only=False, flatten=False):
     kd.balance()
     return kd
 
+def calculate_joined_normal(c, constraint_verts_loops):
+    # Calculate average normal from all loops (each loop keeps its own center)
+    loop_normals = []
+    for loop_data in constraint_verts_loops:
+        if len(loop_data[0]) > 2:
+            _, loop_normal = utils.estimate_best_fit_plane(loop_data[0], "best_fit")
+            loop_normals.append(loop_normal)
+    
+    if len(loop_normals) > 0:
+        # Use stored normal as reference for consistency, or first loop if not available
+        stored_normal = Vector(c.normal)
+        if stored_normal.length > 0.01:
+            reference_normal = stored_normal
+        else:
+            reference_normal = loop_normals[0]
+        
+        # Align all normals to reference direction using dot product
+        joined_normal = Vector((0, 0, 0))
+        for loop_normal in loop_normals:
+            # Flip if pointing opposite direction (dot product < 0)
+            if loop_normal.dot(reference_normal) < 0:
+                loop_normal = -loop_normal
+            joined_normal += loop_normal
+        
+        joined_normal.normalize()
+        # Store for next frame consistency
+        c.normal = joined_normal
+    return joined_normal
 
 def check_constraints_cache(object):
     global constraints_cache
@@ -1029,16 +1058,35 @@ def evaluate_constraints(object, bmesh_edit=None, bmesh_eval=None, inverse_subdi
         # evaluate plane constraint
         if c.constraint_type == "PLANE":
             # PLANE constraint handles loops internally based on fix_center and fix_normal
-            # Shared center, independent orientations
+            # Calculate common center/normal if join options are enabled
+            common_center = None
+            joined_normal = None
+            
+            if c.join_center and not c.fix_center:
+                # Calculate common center from all loops
+                all_verts = []
+                for loop_data in constraint_verts_loops:
+                    all_verts.extend(loop_data[0])
+                if len(all_verts) > 2:
+                    common_center, _ = utils.estimate_best_fit_plane(all_verts, "best_fit")
+            
+            if c.join_normal and not c.fix_normal:
+                # Calculate average normal from all loops (each loop keeps its own center)
+                joined_normal = calculate_joined_normal(c,constraint_verts_loops)
+            
             for loop_data in constraint_verts_loops:
                 if len(loop_data[0]) > 2:
+                    # Determine center and normal for this loop
+                    center = Vector(c.center) if c.fix_center else common_center
+                    normal = Vector(c.normal) if c.fix_normal else joined_normal
+                    
                     loop_offsets = utils.flatten_verts_calculate(
                         loop_data[0],
                         slide=False,
-                        center=Vector(c.center),
-                        normal=Vector(c.normal),
-                        fix_center=c.fix_center,
-                        fix_normal=c.fix_normal,
+                        center=center,
+                        normal=normal,
+                        fix_center=c.fix_center or (common_center is not None),
+                        fix_normal=c.fix_normal or (joined_normal is not None),
                     )
                     target_offsets.update(loop_offsets)
                 
@@ -1209,11 +1257,11 @@ def update_constraint_data(self, context):
 
 
 def update_plane_fix_flags(self, context):
-    """Recalculate center/normal when fix flags are toggled"""
+    """Recalculate center/normal when fix flags are toggled on"""
     if self.constraint_type != "PLANE":
         return
     
-    # Only recalculate if we're enabling a fix flag
+    # If neither fix flag is on, nothing to recalculate
     if not (self.fix_center or self.fix_normal):
         return
     
@@ -1222,16 +1270,30 @@ def update_plane_fix_flags(self, context):
     bm = bmesh.from_edit_mesh(mesh)
     
     # Get vertices from attribute
-    if not self.attribute_name or self.attribute_name not in bm.verts.layers.float:
+    print("attribute_name", self.attribute_name)
+    print("bm.verts.layers.float", bm.verts.layers.float)
+    if not self.attribute_name or self.attribute_name not in bm.edges.layers.float:
+        print("Attribute not found")
         return
+        
+    loops = utils.get_attribute_elements(context.active_object, bm, self, domain="EDGE", as_domain="POINT")
     
-    attribute_layer = bm.verts.layers.float[self.attribute_name]
-    verts = [v for v in bm.verts if v[attribute_layer] == 1.0]
-    
-    if len(verts) > 2:
-        center, normal = utils.estimate_best_fit_plane(verts, "best_fit")
-        self.center = center
-        self.normal = normal
+    joined_normal = calculate_joined_normal(loops)
+    joined_center = Vector((0, 0, 0))
+    total_verts = 0
+    for loop in loops:
+        for v in loop[0]:
+           joined_center += v.co 
+           total_verts += 1
+    joined_center /= total_verts
+    print(f"loops: {len(loops)}")
+    print("joined_normal", joined_normal)
+
+    # Only update the values that are now fixed (since this callback is triggered on change)
+    if self.fix_center:
+        self.center = joined_center
+    if self.fix_normal:
+        self.normal = joined_normal
 
 
 def filter_curves(self, object):
@@ -1282,6 +1344,16 @@ class CustomConstraint(bpy.types.PropertyGroup):
         default=False,
         description="Fix the plane normal/rotation",
         update=update_plane_fix_flags,
+    )
+    join_center: bpy.props.BoolProperty(
+        name="Join Center",
+        default=False,
+        description="Calculate common center for all loops (only when center is not fixed)",
+    )
+    join_normal: bpy.props.BoolProperty(
+        name="Join Normal",
+        default=False,
+        description="Calculate common normal for all loops (only when normal is not fixed)",
     )
     enabled: bpy.props.BoolProperty(name="Enabled", default=True)
     works_on_subdivision: bpy.props.BoolProperty(
@@ -1408,13 +1480,19 @@ class VIEW3D_PT_final_topology_constraints(Panel):
                 layout.prop(ac, "works_on_subdivision")
 
             if ac.constraint_type == "PLANE":
-                layout.prop(ac, "fix_center")
-                layout.prop(ac, "fix_normal")
-                if ac.fix_center or ac.fix_normal:
-                    if ac.fix_center:
-                        layout.prop(ac, "center")
-                    if ac.fix_normal:
-                        layout.prop(ac, "normal")
+                row = layout.row()
+                row.prop(ac, "fix_center")
+                if not ac.fix_center:
+                    row.prop(ac, "join_center")
+                else:
+                    row.prop(ac, "center")
+                
+                row = layout.row()
+                row.prop(ac, "fix_normal")
+                if not ac.fix_normal:
+                    row.prop(ac, "join_normal")
+                else:
+                    row.prop(ac, "normal")
 
             if ac.constraint_type == "CURVE":
                 layout.prop(ac, "target_curve")
