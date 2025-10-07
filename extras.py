@@ -170,6 +170,7 @@ def to_curve_verts_calculate(
     source_curve=None,
     kd=None,
     normal=None,
+    edit_loop_for_endpoints=None,
 ):
     """Calculate new positions for vertices to snap to the closest point on a curve, Return a dictionary with the new positions"""
     target_offsets = {}
@@ -218,9 +219,26 @@ def to_curve_verts_calculate(
     distance_traveled = 0
     target_distance = 0
     for i, vert in enumerate(loop[0]):
-        reference_co = eval_point(
-            object_world_matrix @ vert.co, curve_snapping, source_curve
+        # For first and last vertices in open loops with subdivision,
+        # use edit mesh vertex positions as reference
+        use_edit_vert_for_endpoint = (
+            edit_loop_for_endpoints is not None
+            and not loop_closed
+            and (i == 0 or i == len(loop[0]) - 1)
         )
+
+        if use_edit_vert_for_endpoint:
+            edit_vert = edit_loop_for_endpoints[0][i]
+            reference_co = eval_point(
+                object_world_matrix @ edit_vert.co, curve_snapping, source_curve
+            )
+            vert_index_for_offset = edit_vert.index
+        else:
+            reference_co = eval_point(
+                object_world_matrix @ vert.co, curve_snapping, source_curve
+            )
+            vert_index_for_offset = vert.index
+
         if i == 0:
             next_point_index = i + 1
             if next_point_index >= len(loop[0]):
@@ -239,7 +257,7 @@ def to_curve_verts_calculate(
             # find first point on the curve for closed loops
             if loop_closed:
                 co, index, dist = kd.find(reference_co)
-                target_offsets[vert.index] = co - reference_co
+                target_offsets[vert_index_for_offset] = co - reference_co
                 last_index = index
                 next_point_index = index + 1
                 if next_point_index >= len(bmesh_curve.verts):
@@ -283,7 +301,7 @@ def to_curve_verts_calculate(
                 last_index = index
 
             start_point = co
-            target_offsets[vert.index] = co - reference_co
+            target_offsets[vert_index_for_offset] = co - reference_co
 
         else:
             # iterate through rest of points of spline depending on distribution type
@@ -304,7 +322,7 @@ def to_curve_verts_calculate(
                             curve_snapping,
                             source_curve,
                         )
-                        target_offsets[vert.index] = end_point - reference_co
+                        target_offsets[vert_index_for_offset] = end_point - reference_co
                         break
                     check_index = 0  # Wrap around for cyclic curves
                     
@@ -315,7 +333,7 @@ def to_curve_verts_calculate(
                             curve_snapping,
                             source_curve,
                         )
-                        target_offsets[vert.index] = end_point - reference_co
+                        target_offsets[vert_index_for_offset] = end_point - reference_co
                         break
                     check_index = len(bmesh_curve.verts) - 1  # Wrap around for cyclic curves
 
@@ -332,7 +350,7 @@ def to_curve_verts_calculate(
                     # found the segment, let's interpolate
                     ratio = (target_distance - distance_traveled) / segment_length
                     co = start_point.lerp(end_point, ratio)
-                    target_offsets[vert.index] = co - reference_co
+                    target_offsets[vert_index_for_offset] = co - reference_co
                     distance_traveled = target_distance
                     start_point = co
                     # Don't update last_index - we're still in this segment
@@ -419,6 +437,170 @@ def edge_angle(e1, e2, face_normal):
     c = (M @ c).xy.normalized()
 
     return pi - atan2(a.cross(c), a.dot(c))
+
+
+def space_calculate(loops_data, interpolation="cubic"):
+    """Calculate positions to evenly space vertices along loops
+    
+    Args:
+        loops_data: List of loops, each as [verts_list, is_circular]
+        interpolation: 'cubic' or 'linear'
+    
+    Returns:
+        Dictionary mapping vertex indices to offset vectors
+    """
+    target_offsets = {}
+    
+    for loop_data in loops_data:
+        verts = loop_data[0]
+        is_circular = loop_data[1]
+        
+        if len(verts) < 2:
+            continue
+        
+        # Build knots list (vertex indices in order)
+        knots = [v.index for v in verts]
+        if is_circular and knots[0] != knots[-1]:
+            knots.append(knots[0])
+        
+        # Calculate t values (distances along the loop)
+        tknots = []
+        loc_prev = None
+        len_total = 0
+        for v in verts:
+            loc = v.co.copy()
+            if loc_prev is not None:
+                len_total += (loc - loc_prev).length
+            tknots.append(len_total)
+            loc_prev = loc
+        
+        if is_circular:
+            # Add final segment back to start
+            len_total += (verts[0].co - verts[-1].co).length
+            tknots.append(len_total)
+        
+        # Calculate evenly spaced target points
+        amount = len(knots)
+        if amount < 2:
+            continue
+        
+        t_per_segment = len_total / (amount - 1)
+        tpoints = [i * t_per_segment for i in range(amount)]
+        
+        # Calculate splines
+        if interpolation == 'cubic':
+            splines = calculate_cubic_splines_simple(verts, tknots, is_circular)
+        else:  # linear
+            splines = calculate_linear_splines_simple(verts, tknots)
+        
+        if not splines:
+            continue
+        
+        # Calculate new positions for each vertex
+        for i, v in enumerate(verts):
+            m = tpoints[i]
+            
+            # Find which spline segment this point is on
+            if m in tknots:
+                n = tknots.index(m)
+            else:
+                t = tknots[:]
+                t.append(m)
+                t.sort()
+                n = t.index(m) - 1
+            
+            if n > len(splines) - 1:
+                n = len(splines) - 1
+            elif n < 0:
+                n = 0
+            
+            # Interpolate position on spline
+            if interpolation == 'cubic':
+                ax, bx, cx, dx, tx = splines[n][0]
+                x = ax + bx * (m - tx) + cx * (m - tx) ** 2 + dx * (m - tx) ** 3
+                ay, by, cy, dy, ty = splines[n][1]
+                y = ay + by * (m - ty) + cy * (m - ty) ** 2 + dy * (m - ty) ** 3
+                az, bz, cz, dz, tz = splines[n][2]
+                z = az + bz * (m - tz) + cz * (m - tz) ** 2 + dz * (m - tz) ** 3
+                new_pos = Vector([x, y, z])
+            else:  # linear
+                a, d, t, u = splines[n]
+                if u != 0:
+                    new_pos = ((m - t) / u) * d + a
+                else:
+                    new_pos = a
+            
+            target_offsets[v.index] = new_pos - v.co
+    
+    return target_offsets
+
+
+def calculate_cubic_splines_simple(verts, tknots, circular):
+    """Calculate cubic splines for vertex positions"""
+    n = len(verts)
+    if n < 2:
+        return False
+    
+    x = tknots[:n]
+    locs = [v.co[:] for v in verts]
+    
+    result = []
+    for j in range(3):
+        a = [loc[j] for loc in locs]
+        h = []
+        for i in range(n - 1):
+            if x[i + 1] - x[i] == 0:
+                h.append(1e-8)
+            else:
+                h.append(x[i + 1] - x[i])
+        
+        q = [False]
+        for i in range(1, n - 1):
+            q.append(3 / h[i] * (a[i + 1] - a[i]) - 3 / h[i - 1] * (a[i] - a[i - 1]))
+        
+        l = [1.0]
+        u = [0.0]
+        z = [0.0]
+        for i in range(1, n - 1):
+            l.append(2 * (x[i + 1] - x[i - 1]) - h[i - 1] * u[i - 1])
+            if l[i] == 0:
+                l[i] = 1e-8
+            u.append(h[i] / l[i])
+            z.append((q[i] - h[i - 1] * z[i - 1]) / l[i])
+        
+        l.append(1.0)
+        z.append(0.0)
+        b = [False for i in range(n - 1)]
+        c = [False for i in range(n)]
+        d = [False for i in range(n - 1)]
+        c[n - 1] = 0.0
+        
+        for i in range(n - 2, -1, -1):
+            c[i] = z[i] - u[i] * c[i + 1]
+            b[i] = (a[i + 1] - a[i]) / h[i] - h[i] * (c[i + 1] + 2 * c[i]) / 3
+            d[i] = (c[i + 1] - c[i]) / (3 * h[i])
+        
+        for i in range(n - 1):
+            result.append([a[i], b[i], c[i], d[i], x[i]])
+    
+    splines = []
+    for i in range(n - 1):
+        splines.append([result[i], result[i + n - 1], result[i + (n - 1) * 2]])
+    
+    return splines
+
+
+def calculate_linear_splines_simple(verts, tknots):
+    """Calculate linear splines for vertex positions"""
+    splines = []
+    for i in range(len(verts) - 1):
+        a = verts[i].co
+        b = verts[i + 1].co
+        d = b - a
+        t = tknots[i]
+        u = tknots[i + 1] - t
+        splines.append([a, d, t, u])
+    return splines
 
 
 def slide_optimize_calculate(loops_data):
@@ -1052,7 +1234,9 @@ def evaluate_constraints(object, bmesh_edit=None, bmesh_eval=None, inverse_subdi
             constraint_verts_loops = [constraint_verts_loops_edit]
 
         # Handle subdivision
+        constraint_verts_loops_edit_for_endpoints = None
         if c.works_on_subdivision:
+            constraint_verts_loops_edit_for_endpoints = constraint_verts_loops
             constraint_verts_loops_subdiv = []
             for loop_data in constraint_verts_loops:
                 new_verts = []
@@ -1097,13 +1281,17 @@ def evaluate_constraints(object, bmesh_edit=None, bmesh_eval=None, inverse_subdi
             # CURVE handles single loop - extract first
             constraint_verts_loop = constraint_verts_loops[0]
             if c.target_curve is not None and c.target_curve.type == "CURVE":
-                for loop_data in constraint_verts_loops:
+                for idx, loop_data in enumerate(constraint_verts_loops):
+                    edit_loop_data = None
+                    if constraint_verts_loops_edit_for_endpoints is not None:
+                        edit_loop_data = constraint_verts_loops_edit_for_endpoints[idx]
                     loop_offsets = to_curve_verts_calculate(
                         loop_data,
                         curve_snapping=c.curve_snapping,
                         curve_distribution=c.curve_distribution,
                         kd=constraints_cache[i]["kd"],
                         source_curve=c.target_curve,
+                        edit_loop_for_endpoints=edit_loop_data,
                     )
                     target_offsets.update(loop_offsets)
 
@@ -1146,6 +1334,11 @@ def evaluate_constraints(object, bmesh_edit=None, bmesh_eval=None, inverse_subdi
         elif c.constraint_type == "SLIDE_OPTIMIZE":
             # SLIDE_OPTIMIZE handles multi-loop format
             target_offsets = slide_optimize_calculate(constraint_verts_loops)
+        
+        # evaluate space constraint
+        elif c.constraint_type == "SPACE":
+            # SPACE handles multi-loop format
+            target_offsets = space_calculate(constraint_verts_loops, interpolation=c.space_interpolation)
 
         # move vertices to new locations
         # this has already weighting which might be a good idea with many constraints working together.
@@ -1282,7 +1475,7 @@ def update_plane_fix_flags(self, context):
     joined_normal = None
     
     # Calculate common center and normal from all loops
-    joined_normal, joined_center = calculate_joined_normal(c,loops)
+    joined_normal, joined_center = calculate_joined_normal(self, loops)
 
     # Only update the values that are now fixed (since this callback is triggered on change)
     if self.fix_center:
@@ -1317,13 +1510,20 @@ class CustomConstraint(bpy.types.PropertyGroup):
                 "DRIVER_ROTATIONAL_DIFFERENCE",
                 4,
             ),
-            # ("CIRCLE", "Circle", "Circle constraint", "MESH_CIRCLE", 5),
+            (
+                "SPACE",
+                "Space",
+                "Distribute vertices at equal distances along the loop",
+                "TRACKING_FORWARDS_SINGLE",
+                5,
+            ),
+            # ("CIRCLE", "Circle", "Circle constraint", "MESH_CIRCLE", 6),
             # (
             #     "ANGLE",
             #     "Angle",
             #     "Limit angle for manufacturing purposes",
             #     "LINCURVE",
-            #     6,
+            #     7,
             # ),
         ],
         update=update_constraint_data,
@@ -1418,6 +1618,18 @@ class CustomConstraint(bpy.types.PropertyGroup):
         ],
         update=update_constraint_data,
     )
+    
+    # Space constraint properties
+    space_interpolation: bpy.props.EnumProperty(
+        name="Interpolation",
+        default="cubic",
+        items=[
+            ("cubic", "Cubic", "Natural cubic spline, smooth results"),
+            ("linear", "Linear", "Simple and fast linear algorithm"),
+        ],
+        description="Algorithm used for spacing interpolation",
+        update=update_constraint_data,
+    )
 
 
 class VIEW3D_PT_final_topology_constraints(Panel):
@@ -1441,6 +1653,34 @@ class VIEW3D_PT_final_topology_constraints(Panel):
         layout = self.layout
         mesh = context.active_object.data
 
+        row = layout.row(align=True)
+        row.label(text="Add Constraint:")
+        row.operator_context = "EXEC_DEFAULT"
+        # we need to run operators without invoke
+        op = row.operator("object.final_topology_add_constraint", text="", icon="MESH_PLANE")
+        op.constraint_type = "PLANE"
+        op.name = "Plane"
+
+        op = row.operator("object.final_topology_add_constraint", text="", icon="MESH_PLANE")
+        op.constraint_type = "PLANE_FIXED"
+        op.name = "Plane Fixed"
+        
+        op = row.operator("object.final_topology_add_constraint", text="", icon="CURVE_DATA")
+        op.constraint_type = "CURVE"
+        op.name = "Curve"
+        
+        op = row.operator("object.final_topology_add_constraint", text="", icon="MOD_SUBSURF")
+        op.constraint_type = "INVERSE_SUBDIVIDE"
+        op.name = "Inverse Subdivide"
+        
+        op = row.operator("object.final_topology_add_constraint", text="", icon="DRIVER_ROTATIONAL_DIFFERENCE")
+        op.constraint_type = "SLIDE_OPTIMIZE"
+        op.name = "Slide Optimize"
+        
+        op = row.operator("object.final_topology_add_constraint", text="", icon="TRACKING_FORWARDS_SINGLE")
+        op.constraint_type = "SPACE"
+        op.name = "Space"
+        layout.operator_context = "INVOKE_DEFAULT"
         row = layout.row()
         row.template_list(
             "CUSTOM_UL_constraint_list",
@@ -1493,6 +1733,9 @@ class VIEW3D_PT_final_topology_constraints(Panel):
                 layout.prop(ac, "target_curve")
                 layout.prop(ac, "curve_snapping")
                 layout.prop(ac, "curve_distribution")
+            
+            if ac.constraint_type == "SPACE":
+                layout.prop(ac, "space_interpolation")
             
             if ac.constraint_type == "INVERSE_SUBDIVIDE":
                 layout.label(text="Snap to")
@@ -1631,7 +1874,7 @@ class AddSelectionToConstraintOperator(bpy.types.Operator):
         return {"FINISHED"}
 
 def get_constraint_domain_type(constraint_type):
-    if constraint_type in ["PLANE", "CURVE", "SLIDE_OPTIMIZE"]:
+    if constraint_type in ["PLANE", "CURVE", "SLIDE_OPTIMIZE", "SPACE"]:
         return "EDGE"
     elif constraint_type == "INVERSE_SUBDIVIDE":
         return "POINT"
@@ -1642,10 +1885,9 @@ class AddConstraintOperator(bpy.types.Operator):
     bl_label = "Add Constraint"
     bl_description = (
         "\n\nSelect vertices and run this operator to add a constraint."
-        "\nCurrently only planar constraints are supported."
-        "\nConstraints get evaluated only during Inverse subdivision steps/modal operator."
-        "\n These work together with inverse subdivision snapping, \n"
-        "so you can optimize more parameters of the mesh."
+        "\nConstraints get evaluated each step if enabled."
+        "\n To use also inverse subdivision snapping, \n"
+        "add it as one of the constraints."
     )
     bl_options = {"REGISTER", "UNDO"}
 
@@ -1671,13 +1913,20 @@ class AddConstraintOperator(bpy.types.Operator):
                 "DRIVER_ROTATIONAL_DIFFERENCE",
                 4,
             ),
-            # ("CIRCLE", "Circle", "Circle constraint", "MESH_CIRCLE", 5),
+            (
+                "SPACE",
+                "Space",
+                "Distribute vertices at equal distances along the loop",
+                "TRACKING_FORWARDS_SINGLE",
+                5,
+            ),
+            # ("CIRCLE", "Circle", "Circle constraint", "MESH_CIRCLE", 6),
             # (
             #     "ANGLE",
             #     "Angle",
             #     "Limit angle for manufacturing purposes",
             #     "LINCURVE",
-            #     6,
+            #     7,
             # ),
         ],
     )
@@ -1708,6 +1957,20 @@ class AddConstraintOperator(bpy.types.Operator):
         ],
     )
     # attribute_name: bpy.props.StringProperty(name="Attribute Name", default="Attribute Name")
+    tooltip: bpy.props.StringProperty(  # type: ignore[valid-type]
+        default="Select vertices and run this operator to add a constraint."
+        "\nConstraints get evaluated each step if enabled."
+        "\n To use also inverse subdivision snapping, \n"
+        "add it as one of the constraints."
+    )
+
+    @classmethod
+    def description(cls, context, properties):
+        t = f"Select vertices and run this operator to add a {properties.constraint_type.capitalize()} constraint."
+        "\nConstraints get evaluated each step if enabled."
+        "\n To use also inverse subdivision snapping, \n"
+        "add it as one of the constraints."
+        return t
 
     def execute(self, context):
         # Access the mesh data block
@@ -1845,6 +2108,8 @@ class CUSTOM_UL_constraint_list(bpy.types.UIList):
             icon = "MOD_SUBSURF"
         elif constraint.constraint_type == "SLIDE_OPTIMIZE":
             icon = "DRIVER_ROTATIONAL_DIFFERENCE"
+        elif constraint.constraint_type == "SPACE":
+            icon = "TRACKING_FORWARDS_SINGLE"
 
         layout.prop(constraint, "name", text="", emboss=False, icon=icon)
         
