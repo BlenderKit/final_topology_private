@@ -970,11 +970,16 @@ def build_kd_curve_cache(source_curve, endpoints_only=False, flatten=False):
 def calculate_joined_normal(c, constraint_verts_loops):
     # Calculate average normal from all loops (each loop keeps its own center)
     loop_normals = []
+    joined_center = Vector((0, 0, 0))
+    total_verts = 0
     for loop_data in constraint_verts_loops:
         if len(loop_data[0]) > 2:
             _, loop_normal = utils.estimate_best_fit_plane(loop_data[0], "best_fit")
             loop_normals.append(loop_normal)
-    
+            for v in loop_data[0]:
+                joined_center += v.co
+                total_verts += 1
+    joined_center /= total_verts
     if len(loop_normals) > 0:
         # Use stored normal as reference for consistency, or first loop if not available
         stored_normal = Vector(c.normal)
@@ -994,7 +999,7 @@ def calculate_joined_normal(c, constraint_verts_loops):
         joined_normal.normalize()
         # Store for next frame consistency
         c.normal = joined_normal
-    return joined_normal
+    return joined_normal, joined_center
 
 def check_constraints_cache(object):
     global constraints_cache
@@ -1062,22 +1067,18 @@ def evaluate_constraints(object, bmesh_edit=None, bmesh_eval=None, inverse_subdi
             common_center = None
             joined_normal = None
             
-            if c.join_center and not c.fix_center:
-                # Calculate common center from all loops
-                all_verts = []
-                for loop_data in constraint_verts_loops:
-                    all_verts.extend(loop_data[0])
-                if len(all_verts) > 2:
-                    common_center, _ = utils.estimate_best_fit_plane(all_verts, "best_fit")
-            
-            if c.join_normal and not c.fix_normal:
-                # Calculate average normal from all loops (each loop keeps its own center)
-                joined_normal = calculate_joined_normal(c,constraint_verts_loops)
+            if (c.join_center and not c.fix_center) or (c.join_normal and not c.fix_normal):
+                # Calculate common center and normal from all loops
+                joined_normal, joined_center = calculate_joined_normal(c,constraint_verts_loops)
+            if not c.join_center:
+                joined_center = None
+            if not c.join_normal:
+                joined_normal = None
             
             for loop_data in constraint_verts_loops:
                 if len(loop_data[0]) > 2:
                     # Determine center and normal for this loop
-                    center = Vector(c.center) if c.fix_center else common_center
+                    center = Vector(c.center) if c.fix_center else joined_center
                     normal = Vector(c.normal) if c.fix_normal else joined_normal
                     
                     loop_offsets = utils.flatten_verts_calculate(
@@ -1241,15 +1242,17 @@ def update_constraint_index(self, context):
     draw.clear_draw_list()
     domain = get_constraint_domain_type(constraint.constraint_type)
     
-    elements = utils.get_attribute_elements(
-        context.object, bm, constraint, domain=domain, as_domain=domain
-    )
+    try:
+        elements = utils.get_attribute_elements(
+            context.object, bm, constraint, domain=domain, as_domain=domain
+        )
 
-    if len(elements) > 0:
-        bpy.ops.mesh.select_all(action="DESELECT")
-        for e in elements:
-            e.select = True
-
+        if len(elements) > 0:
+            bpy.ops.mesh.select_all(action="DESELECT")
+            for e in elements:
+                e.select = True
+    except:
+        pass
 
 def update_constraint_data(self, context):
     global constraints_cache
@@ -1270,24 +1273,16 @@ def update_plane_fix_flags(self, context):
     bm = bmesh.from_edit_mesh(mesh)
     
     # Get vertices from attribute
-    print("attribute_name", self.attribute_name)
-    print("bm.verts.layers.float", bm.verts.layers.float)
     if not self.attribute_name or self.attribute_name not in bm.edges.layers.float:
-        print("Attribute not found")
+        print(f"Constraint {self.name} Attribute {self.attribute_name} not found")
         return
         
     loops = utils.get_attribute_elements(context.active_object, bm, self, domain="EDGE", as_domain="POINT")
     
-    joined_normal = calculate_joined_normal(loops)
-    joined_center = Vector((0, 0, 0))
-    total_verts = 0
-    for loop in loops:
-        for v in loop[0]:
-           joined_center += v.co 
-           total_verts += 1
-    joined_center /= total_verts
-    print(f"loops: {len(loops)}")
-    print("joined_normal", joined_normal)
+    joined_normal = None
+    
+    # Calculate common center and normal from all loops
+    joined_normal, joined_center = calculate_joined_normal(c,loops)
 
     # Only update the values that are now fixed (since this callback is triggered on change)
     if self.fix_center:
