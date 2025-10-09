@@ -1,4 +1,4 @@
-# Final Topology addon for Blender 3D
+# Final Topology addon for Blender 3D - 2.0.0
 
 Blender 3D addon that introduces subdivision snapping, retopo and modeling tools from the 21st century.
 
@@ -15,9 +15,12 @@ Enhanced version adds extra tools for professional CAD and automotive industry m
 - **Shape Freeze** - Enables to change topology of Subdivision surface model while keeping the resulting shape as same as possible. (TODO)
 
 ##Advanced version features:
-- **Constraints** - Edit mode constraints that work together with the subdivision surface snapping.  Main difference compared to various shrinkwrap modifier tricks is that all constraints get evaluated in a loop together with the subdivision surface snapping, so all conditions get optimized.
-  - **Plane constraint** snaps verts to a plane, has a fixed version where user can specify coordinates.
+- **Constraints** - Edit mode constraints that work together .  Main difference compared to various shrinkwrap modifier tricks is that all constraints get evaluated in a loop together with the subdivision surface snapping, so all conditions get optimized.
+  - **Inverse subdivision** - Enables to use inverse subdivision on limited selection and mixed with constraints. Boundaries of the constrained area are now handled well. 
+  - **Plane constraint** snaps verts to a plane, has a fixed version where user can specify coordinates. Multiple loops in 1 constraint supported.
   - **Curve constraint** - Experimental constraint that allows to snap to curve during the loop, including inverse subdivision functionality.
+  - **Space constraint** - Enables to space verts along assigned loops evenly.
+  - **Slide optimize** - slides edges along a loop so that the edge straightens or gets angles on both sides of vertex equalized.
 - **Loop align to normal plane** - takes a loop and aligns it to a plane that is aligned with it's normals directions. 
 - **Loop slide optimize** - balances angles that there are between edges of a loop
 - **Flatten selection** - simple flatten to median plane operator (Similar to looptools)
