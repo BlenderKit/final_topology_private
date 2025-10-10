@@ -10,16 +10,17 @@ Enhanced version adds extra tools for professional CAD and automotive industry m
    - Live, or 'Simulation' mode of this tool, which works realtime during modeling
    - Neighbours levels, Number of iteration settings
    - Single step operator that can be called with a shortcut with arbitrary number of iterations.
+   - Supports offset from the target surface.
 - **Unsubdivide** - takes a mesh that resulted from a subdivision modifier being applied (In blender or in any other application) and recreates the original low-resolution mesh.
     -has settings for number of subdivisions, number of iterations of the algorithm. Higher interation numbers yield precise results.
-- **Shape Freeze** - Enables to change topology of Subdivision surface model while keeping the resulting shape as same as possible. (TODO)
+- **Shape Freeze** - Enables to change topology of Subdivision surface model while keeping the resulting shape as same as possible.
 
 ##Advanced version features:
 - **Constraints** - Edit mode constraints that work together .  Main difference compared to various shrinkwrap modifier tricks is that all constraints get evaluated in a loop together with the subdivision surface snapping, so all conditions get optimized.
   - **Inverse subdivision** - Enables to use inverse subdivision on limited selection and mixed with constraints. Boundaries of the constrained area are now handled well. 
   - **Plane constraint** snaps verts to a plane, has a fixed version where user can specify coordinates. Multiple loops in 1 constraint supported.
   - **Curve constraint** - Experimental constraint that allows to snap to curve during the loop, including inverse subdivision functionality.
-  - **Space constraint** - Enables to space verts along assigned loops evenly.
+  - **Space constraint** - Enables to space verts along assigned loops evenly. Borrowed from and works same as in loop tools. 
   - **Slide optimize** - slides edges along a loop so that the edge straightens or gets angles on both sides of vertex equalized.
 - **Loop align to normal plane** - takes a loop and aligns it to a plane that is aligned with it's normals directions. 
 - **Loop slide optimize** - balances angles that there are between edges of a loop
