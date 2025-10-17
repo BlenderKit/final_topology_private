@@ -92,9 +92,13 @@ def final_topology_optimization_step(self, context, iterations=1, neighbours=1):
     me = self.object.data
     bm_edit = bmesh.from_edit_mesh(me)
 
-    inverse_subdivide_prep = inverse_subdivide.prepare_inverse_subdivide(
-        self.object, bm_edit, bm_eval
-    )
+    # if there are constraints and no inverse subdivide constraint, skip inverse subdivide
+    if len(self.object.data.ft_custom_constraints) > 0 and not any(c.constraint_type == "INVERSE_SUBDIVIDE" for c in self.object.data.ft_custom_constraints):
+        inverse_subdivide_prep = None
+    else:   
+        inverse_subdivide_prep = inverse_subdivide.prepare_inverse_subdivide(
+            self.object, bm_edit, bm_eval
+        )
 
     has_constraints = (
         has_extras
