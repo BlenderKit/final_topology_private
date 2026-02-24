@@ -24,8 +24,10 @@ if "bpy" in locals():
     final_topology = reload(final_topology)
     draw = reload(draw)
     utils = reload(utils)
+    print_safe = reload(print_safe)
 else:
     from .final_topology import *
+    from .print_safe import *
 
     try:
         from . import extras
@@ -36,6 +38,7 @@ else:
     from . import final_topology
     from . import draw
     from . import utils
+    from . import print_safe
 
 import bpy
 from bpy.props import (
@@ -238,6 +241,50 @@ class InverseSubdivideAddonPreferences(AddonPreferences):
         description="Use mirror modifier when evaluating",
     )
 
+    print_safe_axis: EnumProperty(
+        name="Axis",
+        items=[
+            ("+X", "+X", "Measure inclination against +X axis"),
+            ("-X", "-X", "Measure inclination against -X axis"),
+            ("+Y", "+Y", "Measure inclination against +Y axis"),
+            ("-Y", "-Y", "Measure inclination against -Y axis"),
+            ("+Z", "+Z", "Measure inclination against +Z axis"),
+            ("-Z", "-Z", "Measure inclination against -Z axis"),
+        ],
+        default="-Z",
+        description="Print-safe axis for slope measurement.\n\n"
+        "The tool checks face normal angle against this direction.\n"
+        "Default -Z is useful for overhang checks in 3D printing.",
+    )
+    print_safe_max_inclination: FloatProperty(
+        name="Max Inclination",
+        default=50.0,
+        min=0.0,
+        max=89.9,
+        description="Allowed inclination in degrees for print-safe mode.\n\n"
+        "Internally compared as (90 - this value) against\n"
+        "angle between face normal and selected axis.\n"
+        "Lower values are stricter.",
+    )
+    print_safe_iterations: IntProperty(
+        name="Iterations",
+        default=12,
+        min=1,
+        max=200,
+        description="Number of optimization passes for print-safe mode.\n\n"
+        "Higher values can improve result on dense meshes,\n"
+        "but increase processing time.",
+    )
+    print_safe_strength: FloatProperty(
+        name="Strength",
+        default=0.35,
+        min=0.01,
+        max=1.0,
+        description="Per-iteration movement multiplier for print-safe mode.\n\n"
+        "Lower values are safer and smoother.\n"
+        "Higher values converge faster but can overshoot.",
+    )
+
 def final_topology_operators_draw(self, context):
     user_preferences = bpy.context.preferences.addons[__name__].preferences
     layout = self.layout
@@ -402,11 +449,23 @@ class VIEW3D_PT_final_topology_objectmode(Panel):
 
     def draw(self, context):
         layout = self.layout
+        user_preferences = bpy.context.preferences.addons[__name__].preferences
 
         op = layout.operator("wm.url_open", text="Watch tutorial", icon="SEQUENCE")
         op.url = "https://youtu.be/5JWf-B89msU?si=Nt8t7JwvngNI3bN9"
 
         layout.operator(FinalUnsubdivide.bl_idname, text="Unsubdivide")
+        box = layout.box()
+        box.label(text="Print Safe (Object Mode):")
+        box.prop(user_preferences, "print_safe_axis")
+        box.prop(user_preferences, "print_safe_max_inclination")
+        box.prop(user_preferences, "print_safe_iterations")
+        box.prop(user_preferences, "print_safe_strength")
+        box.operator(
+            FinalTopologyPrintSafeOperator.bl_idname,
+            text="Make Print Safe",
+            icon="MOD_SOLIDIFY",
+        )
 
 
 class VIEW3D_PT_final_topology_editmode(Panel):
@@ -467,6 +526,7 @@ classes = [
     FinalTopologyStep,
     FreezeShape,
     FinalUnsubdivide,
+    FinalTopologyPrintSafeOperator,
     InverseSubdivideAddonPreferences,
     PopupDialog,
     VIEW3D_PT_final_topology_editmode,

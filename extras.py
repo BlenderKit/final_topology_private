@@ -10,7 +10,7 @@ from mathutils import Vector, kdtree, Matrix, Euler, geometry
 
 # project into XY plane,
 up = Vector((0, 0, 1))
-from math import atan2, pi
+from math import atan2, pi, radians
 from random import random
 
 from bpy.props import (
@@ -1201,6 +1201,128 @@ def check_constraints_cache(object):
             constraints_cache.append(cc_dict)
 
 
+def _get_inclination_axis_vector(axis_name):
+    axis_map = {
+        "+X": Vector((1.0, 0.0, 0.0)),
+        "-X": Vector((-1.0, 0.0, 0.0)),
+        "+Y": Vector((0.0, 1.0, 0.0)),
+        "-Y": Vector((0.0, -1.0, 0.0)),
+        "+Z": Vector((0.0, 0.0, 1.0)),
+        "-Z": Vector((0.0, 0.0, -1.0)),
+    }
+    return axis_map.get(axis_name, Vector((0.0, 0.0, -1.0)))
+
+
+def inclination_limit_calculate(
+    bmesh_edit,
+    constrained_faces,
+    axis_name="-Z",
+    max_angle=50.0,
+    threshold_faces_subdiv=None,
+):
+    """Limit face inclination by sliding lower-half vertices toward upper half with axis lock."""
+    axis = _get_inclination_axis_vector(axis_name)
+    max_angle = max(0.0, min(max_angle, 89.9))
+    threshold_angle = radians(90.0 - max_angle)
+    epsilon = 1e-6
+
+    target_offsets = {}
+    target_counts = {}
+
+    def get_face_angle(face):
+        face_normal = face.normal.copy()
+        if face_normal.length_squared == 0.0:
+            return None
+        face_normal.normalize()
+        return face_normal.angle(axis)
+
+    subdiv_face_centers = []
+    if threshold_faces_subdiv:
+        subdiv_face_centers = [(f, f.calc_center_median()) for f in threshold_faces_subdiv]
+
+    for face in constrained_faces:
+        angle = get_face_angle(face)
+        if angle is None:
+            continue
+        if subdiv_face_centers:
+            face_center = face.calc_center_median()
+            nearest_subdiv_face = min(
+                subdiv_face_centers,
+                key=lambda fc: (fc[1] - face_center).length_squared,
+            )[0]
+            subdiv_angle = get_face_angle(nearest_subdiv_face)
+            if subdiv_angle is not None:
+                angle = subdiv_angle
+        if angle >= threshold_angle:
+            continue
+
+        verts = list(face.verts)
+
+        # Split the face vertices into "lower" and "upper" halves along measured axis.
+        sorted_verts = sorted(verts, key=lambda v: v.co.dot(axis), reverse=True)
+        moving_count = max(1, min(len(sorted_verts) // 2, len(sorted_verts) - 1))
+        moving_verts = sorted_verts[:moving_count]
+        stationary_verts = sorted_verts[moving_count:]
+        if len(moving_verts) == 0 or len(stationary_verts) == 0:
+            continue
+        moving_set = set(moving_verts)
+        stationary_set = set(stationary_verts)
+
+        # "Responsible" edges are the boundary edges that connect moving and stationary halves.
+        responsible_edges = []
+        for edge in face.edges:
+            v1_moving = edge.verts[0] in moving_set
+            v2_moving = edge.verts[1] in moving_set
+            if v1_moving != v2_moving:
+                responsible_edges.append(edge)
+
+        # Scale correction by threshold violation; larger overshoot receives stronger correction.
+        correction_scale = min(1.0, (threshold_angle - angle) / max(threshold_angle, 1e-6))
+        for v in moving_verts:
+            slide_direction = Vector((0.0, 0.0, 0.0))
+            direction_count = 0
+
+            # Primary direction: slide along responsible boundary edges.
+            for edge in responsible_edges:
+                if edge.verts[0] != v and edge.verts[1] != v:
+                    continue
+                other = edge.other_vert(v)
+                if other not in stationary_set:
+                    continue
+                edge_vec = other.co - v.co
+                edge_vec -= axis * edge_vec.dot(axis)
+                if edge_vec.length_squared <= epsilon:
+                    continue
+                slide_direction += edge_vec
+                direction_count += 1
+
+            # Fallback: direct pull to closest stationary vertex, still axis-locked.
+            if direction_count == 0:
+                closest = min(stationary_verts, key=lambda sv: (sv.co - v.co).length_squared)
+                edge_vec = closest.co - v.co
+                edge_vec -= axis * edge_vec.dot(axis)
+                if edge_vec.length_squared > epsilon:
+                    slide_direction += edge_vec
+                    direction_count = 1
+
+            if direction_count == 0:
+                continue
+            slide_direction /= direction_count
+            offset = slide_direction * correction_scale
+
+            if v.index not in target_offsets:
+                target_offsets[v.index] = Vector((0.0, 0.0, 0.0))
+                target_counts[v.index] = 0
+            target_offsets[v.index] += offset
+            target_counts[v.index] += 1
+
+    for v_index, count in target_counts.items():
+        if count > 1:
+            target_offsets[v_index] /= count
+
+    return target_offsets
+
+
 def evaluate_constraints(object, bmesh_edit=None, bmesh_eval=None, inverse_subdivide_prep=None):
     global constraints_cache
     # separate caching for performance
@@ -1217,21 +1339,37 @@ def evaluate_constraints(object, bmesh_edit=None, bmesh_eval=None, inverse_subdi
         target_offsets = {}
 
         domain = get_constraint_domain_type(c.constraint_type)
-        # Get the vertices affected by the constraint
-        constraint_verts_loops_edit = utils.get_attribute_elements(
-            object, bmesh_edit, c, domain=domain, as_domain="POINT"
-        )
-        if len(constraint_verts_loops_edit) == 0:
+        if c.constraint_type == "INCLINATION_LIMIT":
+            constraint_elements_edit = utils.get_attribute_elements(
+                object, bmesh_edit, c, domain=domain, as_domain="FACE"
+            )
+            threshold_faces_subdiv = None
+            if c.works_on_subdivision and bmesh_eval is not None:
+                face_layer_keys = bmesh_eval.faces.layers.float.keys()
+                if c.attribute_name in face_layer_keys:
+                    threshold_faces_subdiv = utils.get_attribute_elements(
+                        object, bmesh_eval, c, domain=domain, as_domain="FACE"
+                    )
+        else:
+            # Get the vertices affected by the constraint
+            constraint_elements_edit = utils.get_attribute_elements(
+                object, bmesh_edit, c, domain=domain, as_domain="POINT"
+            )
+
+        if len(constraint_elements_edit) == 0:
             continue
 
-        # All edge-based constraints receive multi-loop format: [[verts1, is_circular1], [verts2, is_circular2], ...]
-        # Ensure it's always in multi-loop format
-        if isinstance(constraint_verts_loops_edit[0], list) and len(constraint_verts_loops_edit[0]) == 2:
-            # Already multi-loop format
-            constraint_verts_loops = constraint_verts_loops_edit
+        if c.constraint_type == "INCLINATION_LIMIT":
+            constraint_verts_loops = []
         else:
-            # Convert single loop to multi-loop format
-            constraint_verts_loops = [constraint_verts_loops_edit]
+            # All edge-based constraints receive multi-loop format: [[verts1, is_circular1], [verts2, is_circular2], ...]
+            # Ensure it's always in multi-loop format
+            if isinstance(constraint_elements_edit[0], list) and len(constraint_elements_edit[0]) == 2:
+                # Already multi-loop format
+                constraint_verts_loops = constraint_elements_edit
+            else:
+                # Convert single loop to multi-loop format
+                constraint_verts_loops = [constraint_elements_edit]
 
         # Handle subdivision
         constraint_verts_loops_edit_for_endpoints = None
@@ -1329,6 +1467,16 @@ def evaluate_constraints(object, bmesh_edit=None, bmesh_eval=None, inverse_subdi
                     attribute_name=c.attribute_name,
                     normal_offset=c.invsubdiv_normal_offset,
                 )
+
+        # evaluate inclination limit constraint
+        elif c.constraint_type == "INCLINATION_LIMIT":
+            target_offsets = inclination_limit_calculate(
+                bmesh_edit,
+                constrained_faces=constraint_elements_edit,
+                axis_name=c.inclination_axis,
+                max_angle=c.inclination_max_angle,
+                threshold_faces_subdiv=threshold_faces_subdiv,
+            )
         
         # evaluate slide optimize constraint
         elif c.constraint_type == "SLIDE_OPTIMIZE":
@@ -1351,7 +1499,10 @@ def evaluate_constraints(object, bmesh_edit=None, bmesh_eval=None, inverse_subdi
                     scale=1,
                 )
         utils.move_verts_to_targets(bmesh_edit, target_offsets, weight=user_preferences.step_weight)
-
+    # if there's inclination limit constraint, we need to recalculate normals of faces
+    has_inclination_limit_constraint = any(c.constraint_type == "INCLINATION_LIMIT" for c in object.data.ft_custom_constraints)
+    if has_inclination_limit_constraint:
+        bmesh_edit.normal_update()
     return bmesh_edit
 
 
@@ -1393,22 +1544,7 @@ class FunTopologyDecimateOperator(bpy.types.Operator):
             bmesh.ops.dissolve_edges(
                 bm, edges=dis_edges, use_verts=True, use_face_split=True
             )
-            # selected_verts = [v for v in bm.verts if v.select]
-            #
-            # # we need to evaluate result subdivided mesh every iteration,
-            # # so it's affected by previous iterations
-            # depsgraph = bpy.context.evaluated_depsgraph_get()
-            #
-            # bm_eval = get_evaluated_bm(obj, depsgraph)
-            #
-            # if user_preferences.use_object_or_collection == "COLLECTION":
-            #     target_objects = bpy.context.scene.inverse_subdivide_target_collection.objects
-            # else:
-            #     target_objects = [bpy.context.scene.inverse_subdivide_target_object]
-            # level_subs_neighbours = 1 * 2 ** (get_subdivision_modifier_level(obj) - 1)
-            # for v in bm.verts:
-            #     offset = calculate_subdivide_offset(obj, target_objects, bm_eval, v, depsgraph, level_subs_neighbours)
-            #     v.co += offset
+            
 
             bmesh.update_edit_mesh(me)
 
@@ -1504,18 +1640,25 @@ class CustomConstraint(bpy.types.PropertyGroup):
                 3,
             ),
             (
+                "INCLINATION_LIMIT",
+                "Inclination limit",
+                "Limit maximal face inclination relative to selected axis, useful for 3D print overhang control",
+                "ORIENTATION_GLOBAL",
+                4,
+            ),
+            (
                 "SLIDE_OPTIMIZE",
                 "Slide Optimize",
                 "Balance angles where quads meet by sliding vertices along edges",
                 "DRIVER_ROTATIONAL_DIFFERENCE",
-                4,
+                5,
             ),
             (
                 "SPACE",
                 "Space",
                 "Distribute vertices at equal distances along the loop",
                 "TRACKING_FORWARDS_SINGLE",
-                5,
+                6,
             ),
             # ("CIRCLE", "Circle", "Circle constraint", "MESH_CIRCLE", 6),
             # (
@@ -1587,6 +1730,28 @@ class CustomConstraint(bpy.types.PropertyGroup):
         soft_max=0.2,
         description="Normal offset",
         unit="LENGTH",
+    )
+
+    # Inclination limit constraint properties
+    inclination_axis: bpy.props.EnumProperty(
+        name="Axis",
+        items=[
+            ("+X", "+X", "Measure inclination against +X axis"),
+            ("-X", "-X", "Measure inclination against -X axis"),
+            ("+Y", "+Y", "Measure inclination against +Y axis"),
+            ("-Y", "-Y", "Measure inclination against -Y axis"),
+            ("+Z", "+Z", "Measure inclination against +Z axis"),
+            ("-Z", "-Z", "Measure inclination against -Z axis"),
+        ],
+        default="-Z",
+        description="Axis used for inclination measurement",
+    )
+    inclination_max_angle: bpy.props.FloatProperty(
+        name="Max Inclination",
+        default=50.0,
+        min=0.0,
+        max=89.9,
+        description="Maximum allowed inclination angle in degrees (compared using 90-angle against face normal/axis angle)",
     )
     
     # Curve constraint properties
@@ -1672,6 +1837,10 @@ class VIEW3D_PT_final_topology_constraints(Panel):
         op = row.operator("object.final_topology_add_constraint", text="", icon="MOD_SUBSURF")
         op.constraint_type = "INVERSE_SUBDIVIDE"
         op.name = "Inverse Subdivide"
+
+        op = row.operator("object.final_topology_add_constraint", text="", icon="ORIENTATION_GLOBAL")
+        op.constraint_type = "INCLINATION_LIMIT"
+        op.name = "Inclination Limit"
         
         op = row.operator("object.final_topology_add_constraint", text="", icon="DRIVER_ROTATIONAL_DIFFERENCE")
         op.constraint_type = "SLIDE_OPTIMIZE"
@@ -1759,6 +1928,10 @@ class VIEW3D_PT_final_topology_constraints(Panel):
                         row.prop(ac, "invsubdiv_target_collection", text="")
                 
                 layout.prop(ac, "invsubdiv_normal_offset", text="Normal Offset")
+
+            if ac.constraint_type == "INCLINATION_LIMIT":
+                layout.prop(ac, "inclination_axis")
+                layout.prop(ac, "inclination_max_angle")
 
 
 class VIEW3D_PT_final_topology_extra_operators(Panel):
@@ -1878,6 +2051,8 @@ def get_constraint_domain_type(constraint_type):
         return "EDGE"
     elif constraint_type == "INVERSE_SUBDIVIDE":
         return "POINT"
+    elif constraint_type == "INCLINATION_LIMIT":
+        return "FACE"
 
 
 class AddConstraintOperator(bpy.types.Operator):
@@ -1907,18 +2082,25 @@ class AddConstraintOperator(bpy.types.Operator):
                 3,
             ),
             (
+                "INCLINATION_LIMIT",
+                "Inclination limit",
+                "Limit maximal face inclination relative to selected axis, useful for 3D print overhang control",
+                "ORIENTATION_GLOBAL",
+                4,
+            ),
+            (
                 "SLIDE_OPTIMIZE",
                 "Slide Optimize",
                 "Balance angles where quads meet",
                 "DRIVER_ROTATIONAL_DIFFERENCE",
-                4,
+                5,
             ),
             (
                 "SPACE",
                 "Space",
                 "Distribute vertices at equal distances along the loop",
                 "TRACKING_FORWARDS_SINGLE",
-                5,
+                6,
             ),
             # ("CIRCLE", "Circle", "Circle constraint", "MESH_CIRCLE", 6),
             # (
@@ -2106,6 +2288,8 @@ class CUSTOM_UL_constraint_list(bpy.types.UIList):
             icon = "MESH_CIRCLE"
         elif constraint.constraint_type == "INVERSE_SUBDIVIDE":
             icon = "MOD_SUBSURF"
+        elif constraint.constraint_type == "INCLINATION_LIMIT":
+            icon = "ORIENTATION_GLOBAL"
         elif constraint.constraint_type == "SLIDE_OPTIMIZE":
             icon = "DRIVER_ROTATIONAL_DIFFERENCE"
         elif constraint.constraint_type == "SPACE":
