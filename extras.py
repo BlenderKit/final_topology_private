@@ -1323,6 +1323,133 @@ def inclination_limit_calculate(
     return target_offsets
 
 
+def curvature_loop_samples(verts, is_circular):
+    """Measure curvature at every vertex of a loop that has one on both sides.
+
+    Uses the arc length parametrization, so both the parameter and the second
+    derivative are built from the real edge lengths - the curvature is the one of
+    the whole segment, not of an idealized evenly spaced polyline.
+
+    Returns a list of dicts with the loop index, the arc length parameter t,
+    the curvature k along the vertex normal (positive when the loop bulges in the
+    normal direction), the two neighbouring edge lengths and the vertex normal.
+    """
+    count = len(verts)
+
+    # arc length parameter along the loop
+    tknots = [0.0] * count
+    length_total = 0.0
+    for i in range(1, count):
+        length_total += (verts[i].co - verts[i - 1].co).length
+        tknots[i] = length_total
+
+    if is_circular:
+        indices = range(count)
+    else:
+        # endpoints have no curvature defined, they anchor the loop
+        indices = range(1, count - 1)
+
+    samples = []
+    for i in indices:
+        # negative index wraps to the last vertex on circular loops
+        prev_co = verts[i - 1].co
+        next_co = verts[(i + 1) % count].co
+        co = verts[i].co
+
+        h1 = (co - prev_co).length
+        h2 = (next_co - co).length
+        if h1 < 1e-9 or h2 < 1e-9:
+            continue
+
+        normal = verts[i].normal.copy()
+        if normal.length_squared < 1e-12:
+            continue
+        normal.normalize()
+
+        # second derivative on an unevenly spaced grid
+        second_derivative = (
+            prev_co * h2 - co * (h1 + h2) + next_co * h1
+        ) * (2.0 / (h1 * h2 * (h1 + h2)))
+
+        samples.append(
+            {
+                "index": i,
+                "t": tknots[i],
+                "k": -second_derivative.dot(normal),
+                "h1": h1,
+                "h2": h2,
+                "normal": normal,
+            }
+        )
+    return samples
+
+
+def fit_linear_curvature(samples, weights):
+    """Weighted least squares fit of k(t) = a + b*t, returns the fitted curvatures."""
+    sum_w = sum(weights)
+    sum_t = sum(w * s["t"] for w, s in zip(weights, samples))
+    sum_tt = sum(w * s["t"] * s["t"] for w, s in zip(weights, samples))
+    sum_k = sum(w * s["k"] for w, s in zip(weights, samples))
+    sum_tk = sum(w * s["t"] * s["k"] for w, s in zip(weights, samples))
+
+    denominator = sum_w * sum_tt - sum_t * sum_t
+    if abs(denominator) < 1e-12:
+        return [sum_k / sum_w] * len(samples)
+
+    b = (sum_w * sum_tk - sum_t * sum_k) / denominator
+    a = (sum_k - b * sum_t) / sum_w
+    return [a + b * s["t"] for s in samples]
+
+
+def curvature_calculate(loops_data, mode="CONSTANT", max_offset_ratio=0.5):
+    """Push vertices along their normals so the loop keeps an even curvature.
+
+    Args:
+        loops_data: List of loops, each as [verts_list, is_circular]
+        mode: 'CONSTANT' for one curvature along the loop (an arc),
+              'LINEAR' for a curvature that changes at a constant rate.
+
+    Returns:
+        Dictionary mapping vertex indices to offset vectors
+    """
+    target_offsets = {}
+
+    for loop_data in loops_data:
+        verts = loop_data[0]
+        is_circular = loop_data[1]
+        if len(verts) < 3:
+            continue
+
+        samples = curvature_loop_samples(verts, is_circular)
+        if len(samples) < 2:
+            continue
+
+        # each sample stands for the half edge on both of its sides
+        weights = [(s["h1"] + s["h2"]) * 0.5 for s in samples]
+        sum_w = sum(weights)
+        if sum_w < 1e-9:
+            continue
+
+        # a curvature changing at a constant rate can't close on itself,
+        # so circular loops always aim for a single curvature
+        if mode == "LINEAR" and not is_circular and len(samples) >= 3:
+            targets = fit_linear_curvature(samples, weights)
+        else:
+            average = sum(w * s["k"] for w, s in zip(weights, samples)) / sum_w
+            targets = [average] * len(samples)
+
+        for s, target in zip(samples, targets):
+            # moving a vertex by d along its normal changes its curvature
+            # by d * 2 / (h1*h2), so invert that to hit the target curvature
+            offset = (target - s["k"]) * s["h1"] * s["h2"] * 0.5
+            # keep a single step from overshooting into a neighbour
+            limit = max_offset_ratio * min(s["h1"], s["h2"])
+            offset = max(-limit, min(limit, offset))
+            target_offsets[verts[s["index"]].index] = s["normal"] * offset
+
+    return target_offsets
+
+
 def evaluate_constraints(object, bmesh_edit=None, bmesh_eval=None, inverse_subdivide_prep=None):
     global constraints_cache
     # separate caching for performance
@@ -1483,6 +1610,13 @@ def evaluate_constraints(object, bmesh_edit=None, bmesh_eval=None, inverse_subdi
             # SLIDE_OPTIMIZE handles multi-loop format
             target_offsets = slide_optimize_calculate(constraint_verts_loops)
         
+        # evaluate curvature constraint
+        elif c.constraint_type == "CURVATURE":
+            # CURVATURE handles multi-loop format
+            target_offsets = curvature_calculate(
+                constraint_verts_loops, mode=c.curvature_mode
+            )
+
         # evaluate space constraint
         elif c.constraint_type == "SPACE":
             # SPACE handles multi-loop format
@@ -1660,6 +1794,13 @@ class CustomConstraint(bpy.types.PropertyGroup):
                 "TRACKING_FORWARDS_SINGLE",
                 6,
             ),
+            (
+                "CURVATURE",
+                "Curvature",
+                "Even out the curvature along the loop by pushing vertices along their normals",
+                "SPHERECURVE",
+                7,
+            ),
             # ("CIRCLE", "Circle", "Circle constraint", "MESH_CIRCLE", 6),
             # (
             #     "ANGLE",
@@ -1796,6 +1937,27 @@ class CustomConstraint(bpy.types.PropertyGroup):
         update=update_constraint_data,
     )
 
+    # Curvature constraint properties
+    curvature_mode: bpy.props.EnumProperty(
+        name="Curvature",
+        default="CONSTANT",
+        items=[
+            (
+                "CONSTANT",
+                "Constant",
+                "Aim for one curvature along the whole loop, an arc",
+            ),
+            (
+                "LINEAR",
+                "Constant Change",
+                "Let the curvature change at a constant rate along the loop."
+                "\nClosed loops fall back to constant curvature",
+            ),
+        ],
+        description="Curvature profile the loop is pushed towards",
+        update=update_constraint_data,
+    )
+
 
 class VIEW3D_PT_final_topology_constraints(Panel):
     bl_label = "Constraints"
@@ -1849,6 +2011,10 @@ class VIEW3D_PT_final_topology_constraints(Panel):
         op = row.operator("object.final_topology_add_constraint", text="", icon="TRACKING_FORWARDS_SINGLE")
         op.constraint_type = "SPACE"
         op.name = "Space"
+
+        op = row.operator("object.final_topology_add_constraint", text="", icon="SPHERECURVE")
+        op.constraint_type = "CURVATURE"
+        op.name = "Curvature"
         layout.operator_context = "INVOKE_DEFAULT"
         row = layout.row()
         row.template_list(
@@ -1905,6 +2071,9 @@ class VIEW3D_PT_final_topology_constraints(Panel):
             
             if ac.constraint_type == "SPACE":
                 layout.prop(ac, "space_interpolation")
+
+            if ac.constraint_type == "CURVATURE":
+                layout.prop(ac, "curvature_mode")
             
             if ac.constraint_type == "INVERSE_SUBDIVIDE":
                 layout.label(text="Snap to")
@@ -2047,7 +2216,7 @@ class AddSelectionToConstraintOperator(bpy.types.Operator):
         return {"FINISHED"}
 
 def get_constraint_domain_type(constraint_type):
-    if constraint_type in ["PLANE", "CURVE", "SLIDE_OPTIMIZE", "SPACE"]:
+    if constraint_type in ["PLANE", "CURVE", "SLIDE_OPTIMIZE", "SPACE", "CURVATURE"]:
         return "EDGE"
     elif constraint_type == "INVERSE_SUBDIVIDE":
         return "POINT"
@@ -2101,6 +2270,13 @@ class AddConstraintOperator(bpy.types.Operator):
                 "Distribute vertices at equal distances along the loop",
                 "TRACKING_FORWARDS_SINGLE",
                 6,
+            ),
+            (
+                "CURVATURE",
+                "Curvature",
+                "Even out the curvature along the loop",
+                "SPHERECURVE",
+                7,
             ),
             # ("CIRCLE", "Circle", "Circle constraint", "MESH_CIRCLE", 6),
             # (
@@ -2294,6 +2470,8 @@ class CUSTOM_UL_constraint_list(bpy.types.UIList):
             icon = "DRIVER_ROTATIONAL_DIFFERENCE"
         elif constraint.constraint_type == "SPACE":
             icon = "TRACKING_FORWARDS_SINGLE"
+        elif constraint.constraint_type == "CURVATURE":
+            icon = "SPHERECURVE"
 
         layout.prop(constraint, "name", text="", emboss=False, icon=icon)
         
