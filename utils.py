@@ -165,6 +165,8 @@ def get_attribute_elements(
             if len(loops) == 0:
                 return_elements = []
             else:
+                # loops carry vertex indices, so the lookup table has to be valid here
+                bm.verts.ensure_lookup_table()
                 # Convert vertex indices to actual vertex objects for all loops
                 return_elements = []
                 for loop in loops:

@@ -375,7 +375,8 @@ def prepare_inverse_subdivide(obj, bmesh_edit, bm_eval):
     if len(obj.data.ft_custom_constraints) == 0:
         target_objects = get_target_objects()
         if len(target_objects) == 0:
-            return False
+            # nothing to snap to, same "no usable prep data" answer as above
+            return None
         prep_data["target_objects"] = target_objects
     
     return prep_data
@@ -397,7 +398,7 @@ def evaluate_inverse_subdivide(
     """
     user_preferences = bpy.context.preferences.addons[__package__].preferences
 
-    if prep_data is None:
+    if not prep_data:
         return {}
 
     offset_verts_indices = prep_data["offset_verts_indices"] 
