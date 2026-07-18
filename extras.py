@@ -10,7 +10,7 @@ from mathutils import Vector, kdtree, Matrix, Euler, geometry
 
 # project into XY plane,
 up = Vector((0, 0, 1))
-from math import atan2, cos, pi, radians, sin, sqrt
+from math import atan2, cos, exp, log, pi, radians, sin, sqrt
 from random import random
 
 from bpy.props import (
@@ -439,13 +439,54 @@ def edge_angle(e1, e2, face_normal):
     return pi - atan2(a.cross(c), a.dot(c))
 
 
-def space_calculate(loops_data, interpolation="cubic"):
-    """Calculate positions to evenly space vertices along loops
-    
+def ratio_spaced_tpoints(tknots, len_total):
+    """Target arc length positions where each segment keeps one constant ratio to
+    the previous one - a geometric progression of segment lengths.
+
+    The ratio is fitted to the current segments (least squares on the log lengths),
+    so the loop keeps its own tendency and only regularizes it into an exact
+    progression. Returns None when the segments don't define a usable ratio, the
+    caller then falls back to even spacing.
+    """
+    lengths = [tknots[i + 1] - tknots[i] for i in range(len(tknots) - 1)]
+    count = len(lengths)
+    if count < 2 or any(l < 1e-9 for l in lengths):
+        return None
+
+    # fit log(length_i) = a + slope * i, so slope is the log of the mean ratio
+    logs = [log(l) for l in lengths]
+    mean_index = (count - 1) / 2.0
+    mean_log = sum(logs) / count
+    denominator = sum((i - mean_index) ** 2 for i in range(count))
+    slope = sum((i - mean_index) * (lg - mean_log) for i, lg in enumerate(logs)) / denominator
+    # keep a degenerate loop from collapsing all its verts into one end
+    slope = max(-log(4.0), min(log(4.0), slope))
+    ratio = exp(slope)
+    if abs(ratio - 1.0) < 1e-9:
+        # the even fallback is exactly this
+        return None
+
+    first = len_total * (1.0 - ratio) / (1.0 - ratio ** count)
+    tpoints = [0.0]
+    segment = first
+    for i in range(count):
+        tpoints.append(tpoints[-1] + segment)
+        segment *= ratio
+    # kill the accumulated float error at the anchored far end
+    tpoints[-1] = len_total
+    return tpoints
+
+
+def space_calculate(loops_data, interpolation="cubic", method="EVEN"):
+    """Calculate positions to space vertices along loops
+
     Args:
         loops_data: List of loops, each as [verts_list, is_circular]
         interpolation: 'cubic' or 'linear'
-    
+        method: 'EVEN' for equal distances, 'RATIO' for one constant ratio between
+            neighbouring segments - open loops only, closed loops can't keep a
+            ratio other than one all the way around and fall back to even.
+
     Returns:
         Dictionary mapping vertex indices to offset vectors
     """
@@ -482,9 +523,13 @@ def space_calculate(loops_data, interpolation="cubic"):
             spline_verts, spline_tknots = verts, tknots
             segments = len(verts) - 1
 
-        # Calculate evenly spaced target points
-        t_per_segment = len_total / segments
-        tpoints = [i * t_per_segment for i in range(len(verts))]
+        # Calculate target points along the arc
+        tpoints = None
+        if method == "RATIO" and not is_circular:
+            tpoints = ratio_spaced_tpoints(tknots, len_total)
+        if tpoints is None:
+            t_per_segment = len_total / segments
+            tpoints = [i * t_per_segment for i in range(len(verts))]
 
         # Calculate splines
         if interpolation == 'cubic':
@@ -1484,22 +1529,13 @@ def curvature_calculate(loops_data, mode="CONSTANT", max_offset_ratio=0.5):
     return target_offsets
 
 
-def line_endpoints_from_loops(loops_data):
-    """Ends of the first open loop, the two points a line constraint spans."""
-    for loop_data in loops_data:
-        verts = loop_data[0]
-        is_circular = loop_data[1]
-        if not is_circular and len(verts) >= 2:
-            return verts[0].co.copy(), verts[-1].co.copy()
-    return None
-
-
-def line_verts_calculate(loops_data, distribution="ORIGINAL", start=None, end=None):
+def line_verts_calculate(loops_data, distribution="ORIGINAL", fixed_lines=None):
     """Pull the vertices of open loops onto a straight line.
 
     The line runs from the first to the last vertex of each loop, so the ends stay
-    where they are and only the vertices between them move. When start and end are
-    given the line is fixed instead, and every loop gets pulled onto that one line.
+    where they are and only the vertices between them move. With fixed_lines given
+    (a list of (start, end) pairs, one per loop) each loop instead gets pulled onto
+    the nearest stored line.
 
     Args:
         loops_data: List of loops, each as [verts_list, is_circular]
@@ -1518,9 +1554,14 @@ def line_verts_calculate(loops_data, distribution="ORIGINAL", start=None, end=No
         if is_circular or len(verts) < 2:
             continue
 
-        if start is not None and end is not None:
-            line_start = Vector(start)
-            line_end = Vector(end)
+        if fixed_lines:
+            # each loop follows its own stored line - the nearest one, so the
+            # match survives loops being re-discovered in a different order
+            loop_mid = (verts[0].co + verts[-1].co) * 0.5
+            line_start, line_end = min(
+                fixed_lines,
+                key=lambda se: ((se[0] + se[1]) * 0.5 - loop_mid).length_squared,
+            )
         else:
             line_start = verts[0].co.copy()
             line_end = verts[-1].co.copy()
@@ -1586,12 +1627,13 @@ def fit_circle_to_loop(verts):
     return center, normal, sqrt(r_squared)
 
 
-def circle_verts_calculate(loops_data, distribution="ORIGINAL", center=None, normal=None, radius=None):
+def circle_verts_calculate(loops_data, distribution="ORIGINAL", fixed_circles=None):
     """Pull the vertices of loops onto a circle.
 
-    Without a given circle each loop gets its own best fit. With center, normal and
-    radius given the circle is fixed, and every loop gets pulled onto that one.
-    Open loops work too, they land on an arc of the circle.
+    Without fixed circles each loop gets its own best fit. With fixed_circles given
+    (a list of (center, normal, radius) tuples, one per loop) each loop instead gets
+    pulled onto the nearest stored circle. Open loops work too, they land on an arc
+    of the circle.
 
     Args:
         loops_data: List of loops, each as [verts_list, is_circular]
@@ -1602,7 +1644,6 @@ def circle_verts_calculate(loops_data, distribution="ORIGINAL", center=None, nor
         Dictionary mapping vertex indices to offset vectors
     """
     target_offsets = {}
-    fixed = center is not None and normal is not None and radius is not None
 
     for loop_data in loops_data:
         verts = loop_data[0]
@@ -1610,10 +1651,17 @@ def circle_verts_calculate(loops_data, distribution="ORIGINAL", center=None, nor
         if len(verts) < 3:
             continue
 
-        if fixed:
-            c = Vector(center)
-            n = Vector(normal)
-            r = radius
+        if fixed_circles:
+            # each loop follows its own stored circle - the nearest one, so the
+            # match survives loops being re-discovered in a different order
+            loop_center = Vector((0, 0, 0))
+            for vert in verts:
+                loop_center += vert.co
+            loop_center /= len(verts)
+            c, n, r = min(
+                fixed_circles,
+                key=lambda cnr: (cnr[0] - loop_center).length_squared,
+            )
             if n.length_squared < 1e-12 or r <= 0.0:
                 continue
             n = n.normalized()
@@ -1652,10 +1700,17 @@ def circle_verts_calculate(loops_data, distribution="ORIGINAL", center=None, nor
                 # a closed loop spans the full turn, in its own winding direction
                 sweep = 2.0 * pi if unwrapped[-1] >= unwrapped[0] else -2.0 * pi
                 step = sweep / len(verts)
+                base = [step * i for i in range(len(verts))]
+                # rotate the even fan to where it needs the least total turning,
+                # instead of pinning it to whichever vertex starts the loop - that
+                # vertex would never feel a tangential pull, and combined with
+                # other constraints the spacing could never balance out
+                phase = sum(a - b for a, b in zip(unwrapped, base)) / len(verts)
+                target_angles = [phase + b for b in base]
             else:
                 # an open loop keeps its ends, the arc between them gets divided
                 step = (unwrapped[-1] - unwrapped[0]) / (len(verts) - 1)
-            target_angles = [unwrapped[0] + step * i for i in range(len(verts))]
+                target_angles = [unwrapped[0] + step * i for i in range(len(verts))]
         else:
             target_angles = unwrapped
 
@@ -1829,22 +1884,28 @@ def evaluate_constraints(object, bmesh_edit=None, bmesh_eval=None, inverse_subdi
         # evaluate line constraint
         elif c.constraint_type == "LINE":
             # LINE handles multi-loop format
+            fixed_lines = None
+            if c.fix_line and len(c.fixed_lines) > 0:
+                fixed_lines = [(Vector(item.start), Vector(item.end)) for item in c.fixed_lines]
             target_offsets = line_verts_calculate(
                 constraint_verts_loops,
                 distribution="EVEN" if c.even_distribution else "ORIGINAL",
-                start=c.line_start if c.fix_line else None,
-                end=c.line_end if c.fix_line else None,
+                fixed_lines=fixed_lines,
             )
 
         # evaluate circle constraint
         elif c.constraint_type == "CIRCLE":
             # CIRCLE handles multi-loop format
+            fixed_circles = None
+            if c.fix_circle and len(c.fixed_circles) > 0:
+                fixed_circles = [
+                    (Vector(item.center), Vector(item.normal), item.radius)
+                    for item in c.fixed_circles
+                ]
             target_offsets = circle_verts_calculate(
                 constraint_verts_loops,
                 distribution="EVEN" if c.even_distribution else "ORIGINAL",
-                center=c.circle_center if c.fix_circle else None,
-                normal=c.circle_normal if c.fix_circle else None,
-                radius=c.circle_radius if c.fix_circle else None,
+                fixed_circles=fixed_circles,
             )
 
         # evaluate curvature constraint
@@ -1857,7 +1918,11 @@ def evaluate_constraints(object, bmesh_edit=None, bmesh_eval=None, inverse_subdi
         # evaluate space constraint
         elif c.constraint_type == "SPACE":
             # SPACE handles multi-loop format
-            target_offsets = space_calculate(constraint_verts_loops, interpolation=c.space_interpolation)
+            target_offsets = space_calculate(
+                constraint_verts_loops,
+                interpolation=c.space_interpolation,
+                method=c.space_method,
+            )
 
         # move vertices to new locations
         # this has already weighting which might be a good idea with many constraints working together.
@@ -1992,7 +2057,7 @@ def update_plane_fix_flags(self, context):
 
 
 def update_line_fix_flags(self, context):
-    """Capture the current loop ends when the line gets fixed"""
+    """Capture the current ends of every open loop when the line gets fixed"""
     if self.constraint_type != "LINE" or not self.fix_line:
         return
 
@@ -2006,14 +2071,21 @@ def update_line_fix_flags(self, context):
     loops = utils.get_attribute_elements(
         context.active_object, bm, self, domain="EDGE", as_domain="POINT"
     )
-    endpoints = line_endpoints_from_loops(loops)
-    if endpoints is None:
-        return
-    self.line_start, self.line_end = endpoints
+    # one stored line per loop - a single shared line would suck all loops
+    # onto the first one
+    self.fixed_lines.clear()
+    for loop_data in loops:
+        verts = loop_data[0]
+        is_circular = loop_data[1]
+        if is_circular or len(verts) < 2:
+            continue
+        item = self.fixed_lines.add()
+        item.start = verts[0].co.copy()
+        item.end = verts[-1].co.copy()
 
 
 def update_circle_fix_flags(self, context):
-    """Capture the current best-fit circle when the circle gets fixed"""
+    """Capture the current best-fit circle of every loop when the circle gets fixed"""
     if self.constraint_type != "CIRCLE" or not self.fix_circle:
         return
 
@@ -2027,15 +2099,33 @@ def update_circle_fix_flags(self, context):
     loops = utils.get_attribute_elements(
         context.active_object, bm, self, domain="EDGE", as_domain="POINT"
     )
+    # one stored circle per loop - a single shared circle would suck all loops
+    # onto the first one
+    self.fixed_circles.clear()
     for loop_data in loops:
         fit = fit_circle_to_loop(loop_data[0])
         if fit is not None:
-            self.circle_center, self.circle_normal, self.circle_radius = fit
-            return
+            item = self.fixed_circles.add()
+            item.center, item.normal, item.radius = fit
 
 
 def filter_curves(self, object):
     return object.type == "CURVE"
+
+
+class FixedLineItem(bpy.types.PropertyGroup):
+    """One stored line of a fixed line constraint, one per loop"""
+
+    start: bpy.props.FloatVectorProperty(name="Start", size=3, subtype="XYZ")
+    end: bpy.props.FloatVectorProperty(name="End", size=3, subtype="XYZ")
+
+
+class FixedCircleItem(bpy.types.PropertyGroup):
+    """One stored circle of a fixed circle constraint, one per loop"""
+
+    center: bpy.props.FloatVectorProperty(name="Center", size=3, subtype="XYZ")
+    normal: bpy.props.FloatVectorProperty(name="Normal", size=3, subtype="XYZ")
+    radius: bpy.props.FloatProperty(name="Radius", default=0.0, unit="LENGTH")
 
 
 class CustomConstraint(bpy.types.PropertyGroup):
@@ -2221,6 +2311,22 @@ class CustomConstraint(bpy.types.PropertyGroup):
 
 
     # Space constraint properties
+    space_method: bpy.props.EnumProperty(
+        name="Spacing",
+        default="EVEN",
+        items=[
+            ("EVEN", "Even", "Distribute vertices at equal distances along the loop"),
+            (
+                "RATIO",
+                "Same Ratio",
+                "Keep one constant ratio between neighbouring segment lengths,"
+                "\nfitted to the loop's current tendency."
+                "\nOpen loops only, closed loops fall back to even spacing",
+            ),
+        ],
+        description="How the vertices get distributed along the loop",
+        update=update_constraint_data,
+    )
     space_interpolation: bpy.props.EnumProperty(
         name="Interpolation",
         default="cubic",
@@ -2260,8 +2366,7 @@ class CustomConstraint(bpy.types.PropertyGroup):
         description="Keep the line where it is now, instead of letting the loop ends define it",
         update=update_line_fix_flags,
     )
-    line_start: bpy.props.FloatVectorProperty(name="Start", size=3, subtype="XYZ")
-    line_end: bpy.props.FloatVectorProperty(name="End", size=3, subtype="XYZ")
+    fixed_lines: bpy.props.CollectionProperty(type=FixedLineItem)
 
     # Circle constraint properties
     fix_circle: bpy.props.BoolProperty(
@@ -2270,9 +2375,7 @@ class CustomConstraint(bpy.types.PropertyGroup):
         description="Keep the circle where it is now, instead of refitting it to the loop",
         update=update_circle_fix_flags,
     )
-    circle_center: bpy.props.FloatVectorProperty(name="Center", size=3, subtype="XYZ")
-    circle_normal: bpy.props.FloatVectorProperty(name="Normal", size=3, subtype="XYZ")
-    circle_radius: bpy.props.FloatProperty(name="Radius", default=0.0, unit="LENGTH")
+    fixed_circles: bpy.props.CollectionProperty(type=FixedCircleItem)
 
 
 class VIEW3D_PT_final_topology_constraints(Panel):
@@ -2402,6 +2505,7 @@ class VIEW3D_PT_final_topology_constraints(Panel):
                 layout.prop(ac, "even_distribution")
             
             if ac.constraint_type == "SPACE":
+                layout.prop(ac, "space_method")
                 layout.prop(ac, "space_interpolation")
 
             if ac.constraint_type == "CURVATURE":
@@ -2411,18 +2515,20 @@ class VIEW3D_PT_final_topology_constraints(Panel):
                 layout.prop(ac, "even_distribution")
                 layout.prop(ac, "fix_line")
                 if ac.fix_line:
-                    col = layout.column(align=True)
-                    col.prop(ac, "line_start")
-                    col.prop(ac, "line_end")
+                    for item in ac.fixed_lines:
+                        col = layout.column(align=True)
+                        col.prop(item, "start")
+                        col.prop(item, "end")
 
             if ac.constraint_type == "CIRCLE":
                 layout.prop(ac, "even_distribution")
                 layout.prop(ac, "fix_circle")
                 if ac.fix_circle:
-                    col = layout.column(align=True)
-                    col.prop(ac, "circle_center")
-                    col.prop(ac, "circle_normal")
-                    col.prop(ac, "circle_radius")
+                    for item in ac.fixed_circles:
+                        col = layout.column(align=True)
+                        col.prop(item, "center")
+                        col.prop(item, "normal")
+                        col.prop(item, "radius")
             
             if ac.constraint_type == "INVERSE_SUBDIVIDE":
                 layout.label(text="Snap to")
@@ -3097,6 +3203,8 @@ classes = [
     FlattenSelectionOperator,
     NormalLoopAlign,
     FunTopologyDecimateOperator,
+    FixedLineItem,
+    FixedCircleItem,
     CustomConstraint,
     AddConstraintOperator,
     AddSelectionToConstraintOperator,
