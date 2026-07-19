@@ -16,6 +16,7 @@ from importlib import reload
 has_extras = True
 if "bpy" in locals():
     try:
+        gizmos = reload(gizmos)
         extras = reload(extras)
     except Exception as e:
         has_extras = False
@@ -30,6 +31,7 @@ else:
     from .print_safe import *
 
     try:
+        from . import gizmos
         from . import extras
         from .extras import *
     except Exception as e:
