@@ -95,10 +95,18 @@ def final_topology_optimization_step(self, context, iterations=1, neighbours=1):
     # if there are constraints and no inverse subdivide constraint, skip inverse subdivide
     if len(self.object.data.ft_custom_constraints) > 0 and not any(c.constraint_type == "INVERSE_SUBDIVIDE" for c in self.object.data.ft_custom_constraints):
         inverse_subdivide_prep = None
-    else:   
+    else:
         inverse_subdivide_prep = inverse_subdivide.prepare_inverse_subdivide(
             self.object, bm_edit, bm_eval
         )
+        # with no constraints there has to be something to snap to, otherwise
+        # there is nothing this step could do
+        if not inverse_subdivide_prep:
+            self.report(
+                {"WARNING"},
+                "Nothing to snap to. Add a mesh to snap to, use Freeze Shape, or add constraints.",
+            )
+            return False
 
     has_constraints = (
         has_extras
@@ -175,10 +183,12 @@ class FinalTopologyStep(Operator):
         done = final_topology_optimization_step(
             self, context, self.iterations, self.neighbours
         )
+        # restore the modifiers also when the step bailed out,
+        # otherwise they stay hidden and the subdivision levels stay clamped
+        set_modifiers_end(self.object, modifiers_state_start)
         if not done:
             return {"CANCELLED"}
 
-        set_modifiers_end(self.object, modifiers_state_start)
         return {"FINISHED"}
 
     def invoke(self, context, event):

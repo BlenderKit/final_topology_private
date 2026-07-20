@@ -16,6 +16,7 @@ from importlib import reload
 has_extras = True
 if "bpy" in locals():
     try:
+        gizmos = reload(gizmos)
         extras = reload(extras)
     except Exception as e:
         has_extras = False
@@ -30,6 +31,7 @@ else:
     from .print_safe import *
 
     try:
+        from . import gizmos
         from . import extras
         from .extras import *
     except Exception as e:
@@ -292,23 +294,23 @@ def final_topology_operators_draw(self, context):
 
     layout.operator(
         FinalTopologyStep.bl_idname,
-        text="Inverse Subdivide Step",
-        icon="TRACKING_FORWARDS_SINGLE",
+        text="Step",
+        icon="NEXT_KEYFRAME",
     )
 
     if active_obj.final_topology.enable_operator:
         layout.operator(
             finalTopologyModal.bl_idname,
-            text="Inverse Subdsurf Modal",
-            icon="MOD_SUBSURF",
+            text="Pause",
+            icon="PAUSE",
             emboss=True,
             depress=True,
         )
     else:
         layout.operator(
             finalTopologyModal.bl_idname,
-            text="Inverse Subdsurf Modal",
-            icon="MOD_SUBSURF",
+            text="Run",
+            icon="PLAY",
             emboss=True,
             depress=False,
         )

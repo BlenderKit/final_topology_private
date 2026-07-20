@@ -375,7 +375,8 @@ def prepare_inverse_subdivide(obj, bmesh_edit, bm_eval):
     if len(obj.data.ft_custom_constraints) == 0:
         target_objects = get_target_objects()
         if len(target_objects) == 0:
-            return False
+            # nothing to snap to, same "no usable prep data" answer as above
+            return None
         prep_data["target_objects"] = target_objects
     
     return prep_data
@@ -397,7 +398,7 @@ def evaluate_inverse_subdivide(
     """
     user_preferences = bpy.context.preferences.addons[__package__].preferences
 
-    if prep_data is None:
+    if not prep_data:
         return {}
 
     offset_verts_indices = prep_data["offset_verts_indices"] 
@@ -490,7 +491,9 @@ def evaluate_inverse_subdivide(
 
             if mirror_data is not None:
                 for mirror_center, mirror_normal, merge_distance in mirror_data:
-                    if (v.co - mirror_center).dot(mirror_normal) < merge_distance:
+                    # absolute distance: the signed test also caught vertices far
+                    # on the mirrored side and teleported them onto the plane
+                    if abs((v.co - mirror_center).dot(mirror_normal)) < merge_distance:
                         temp_co = v.co + v_normal_offset
                         to_center = mirror_center - temp_co
                         distance_to_plane = to_center.dot(mirror_normal)
