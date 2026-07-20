@@ -491,7 +491,9 @@ def evaluate_inverse_subdivide(
 
             if mirror_data is not None:
                 for mirror_center, mirror_normal, merge_distance in mirror_data:
-                    if (v.co - mirror_center).dot(mirror_normal) < merge_distance:
+                    # absolute distance: the signed test also caught vertices far
+                    # on the mirrored side and teleported them onto the plane
+                    if abs((v.co - mirror_center).dot(mirror_normal)) < merge_distance:
                         temp_co = v.co + v_normal_offset
                         to_center = mirror_center - temp_co
                         distance_to_plane = to_center.dot(mirror_normal)

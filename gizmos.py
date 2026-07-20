@@ -15,6 +15,8 @@ The adapter protocol, all coordinates in world space:
                                     frame it started in
     translate(snapshot, axis, d)    move distance d along snapshot axis 0..2
     rotate(snapshot, axis, angle)   rotate around snapshot axis 0..2
+    translation_axes()              optional, which arrows to show, e.g. a plane
+                                    with an unfixed center hides all of them
     rotation_axes()                 optional, which dials to show, e.g. a circle
                                     hides the spin around its own normal
     radius()                        optional, world radius of an outline circle
@@ -163,6 +165,9 @@ class TransformGizmoUnit:
 
         location = target.location()
         basis = target.orientation()
+        translation_axes = (True, True, True)
+        if hasattr(target, "translation_axes"):
+            translation_axes = target.translation_axes()
         rotation_axes = (True, True, True)
         if hasattr(target, "rotation_axes"):
             rotation_axes = target.rotation_axes()
@@ -170,8 +175,9 @@ class TransformGizmoUnit:
         for i, gz in enumerate(self.arrows):
             if gz.is_modal:
                 continue
-            gz.hide = False
-            gz.matrix_basis = _axis_matrix(basis.col[i], location)
+            gz.hide = not translation_axes[i]
+            if not gz.hide:
+                gz.matrix_basis = _axis_matrix(basis.col[i], location)
         for i, gz in enumerate(self.dials):
             if gz.is_modal:
                 continue

@@ -1486,12 +1486,14 @@ def inclination_limit_calculate(
     return target_offsets
 
 
-def curvature_loop_samples(verts, is_circular):
+def curvature_loop_samples(verts, is_circular, measure="LENGTH"):
     """Measure curvature at every vertex of a loop that has one on both sides.
 
-    Uses the arc length parametrization, so both the parameter and the second
-    derivative are built from the real edge lengths - the curvature is the one of
-    the whole segment, not of an idealized evenly spaced polyline.
+    measure 'LENGTH' uses the arc length parametrization, so both the parameter
+    and the second derivative are built from the real edge lengths - the
+    curvature is the one of the whole segment, not of an idealized evenly
+    spaced polyline. measure 'ANGLE' takes only the turn angle at the vertex,
+    so denser vertices allow the shape to turn more tightly.
 
     Returns a list of dicts with the loop index, the arc length parameter t,
     the curvature k along the vertex normal (positive when the loop bulges in the
@@ -1529,16 +1531,25 @@ def curvature_loop_samples(verts, is_circular):
             continue
         normal.normalize()
 
-        # second derivative on an unevenly spaced grid
-        second_derivative = (
-            prev_co * h2 - co * (h1 + h2) + next_co * h1
-        ) * (2.0 / (h1 * h2 * (h1 + h2)))
+        if measure == "ANGLE":
+            # turn between the incoming and outgoing direction along the normal,
+            # segment lengths deliberately don't enter - vertex density then
+            # decides how tightly the shape may turn
+            d1 = (co - prev_co) / h1
+            d2 = (next_co - co) / h2
+            k = -(d2 - d1).dot(normal)
+        else:
+            # second derivative on an unevenly spaced grid
+            second_derivative = (
+                prev_co * h2 - co * (h1 + h2) + next_co * h1
+            ) * (2.0 / (h1 * h2 * (h1 + h2)))
+            k = -second_derivative.dot(normal)
 
         samples.append(
             {
                 "index": i,
                 "t": tknots[i],
-                "k": -second_derivative.dot(normal),
+                "k": k,
                 "h1": h1,
                 "h2": h2,
                 "normal": normal,
@@ -1564,31 +1575,47 @@ def fit_linear_curvature(samples, weights):
     return [a + b * s["t"] for s in samples]
 
 
-def curvature_calculate(loops_data, mode="CONSTANT", max_offset_ratio=0.5):
+def curvature_calculate(
+    loops_data,
+    mode="CONSTANT",
+    max_offset_ratio=0.5,
+    measure="LENGTH",
+    movable_ranges=None,
+):
     """Push vertices along their normals so the loop keeps an even curvature.
 
     Args:
         loops_data: List of loops, each as [verts_list, is_circular]
         mode: 'CONSTANT' for one curvature along the loop (an arc),
               'LINEAR' for a curvature that changes at a constant rate.
+        measure: 'LENGTH' evens out the true curvature, 'ANGLE' evens out the
+            turn angle per vertex regardless of segment lengths.
+        movable_ranges: optional list of (start, end) index ranges per loop.
+            Every sample still feeds the estimate, but only vertices within
+            the range receive offsets - the way surrounding context vertices
+            shape the target without being moved themselves.
 
     Returns:
         Dictionary mapping vertex indices to offset vectors
     """
     target_offsets = {}
 
-    for loop_data in loops_data:
+    for loop_index, loop_data in enumerate(loops_data):
         verts = loop_data[0]
         is_circular = loop_data[1]
         if len(verts) < 3:
             continue
 
-        samples = curvature_loop_samples(verts, is_circular)
+        samples = curvature_loop_samples(verts, is_circular, measure)
         if len(samples) < 2:
             continue
 
-        # each sample stands for the half edge on both of its sides
-        weights = [(s["h1"] + s["h2"]) * 0.5 for s in samples]
+        if measure == "ANGLE":
+            # the angle is a per-vertex quantity, every vertex counts the same
+            weights = [1.0] * len(samples)
+        else:
+            # each sample stands for the half edge on both of its sides
+            weights = [(s["h1"] + s["h2"]) * 0.5 for s in samples]
         sum_w = sum(weights)
         if sum_w < 1e-9:
             continue
@@ -1601,16 +1628,68 @@ def curvature_calculate(loops_data, mode="CONSTANT", max_offset_ratio=0.5):
             average = sum(w * s["k"] for w, s in zip(weights, samples)) / sum_w
             targets = [average] * len(samples)
 
+        movable = None
+        if movable_ranges is not None:
+            movable = movable_ranges[loop_index]
+
         for s, target in zip(samples, targets):
-            # moving a vertex by d along its normal changes its curvature
-            # by d * 2 / (h1*h2), so invert that to hit the target curvature
-            offset = (target - s["k"]) * s["h1"] * s["h2"] * 0.5
+            if movable is not None and not (movable[0] <= s["index"] < movable[1]):
+                continue
+            if measure == "ANGLE":
+                # moving a vertex by d along its normal changes its angle
+                # by d * (h1+h2) / (h1*h2), invert that to hit the target
+                offset = (target - s["k"]) * s["h1"] * s["h2"] / (s["h1"] + s["h2"])
+            else:
+                # moving a vertex by d along its normal changes its curvature
+                # by d * 2 / (h1*h2), so invert that to hit the target curvature
+                offset = (target - s["k"]) * s["h1"] * s["h2"] * 0.5
             # keep a single step from overshooting into a neighbour
             limit = max_offset_ratio * min(s["h1"], s["h2"])
             offset = max(-limit, min(limit, offset))
             target_offsets[verts[s["index"]].index] = s["normal"] * offset
 
     return target_offsets
+
+
+def walk_loop_continuation(prev_vert, end_vert, max_steps, forbidden):
+    """Continue an edge loop beyond its end, at most max_steps edges further.
+
+    Follows the usual edge loop rule - the next edge at a vertex is the one
+    sharing no face with the incoming one. Stops at poles, boundaries and
+    vertices already claimed. Returns the vertices beyond end_vert, nearest
+    first.
+    """
+    result = []
+    if max_steps < 1:
+        return result
+    incoming = None
+    for edge in end_vert.link_edges:
+        if edge.other_vert(end_vert) == prev_vert:
+            incoming = edge
+            break
+    if incoming is None:
+        return result
+
+    visited = set(forbidden)
+    current = end_vert
+    while len(result) < max_steps:
+        incoming_faces = set(incoming.link_faces)
+        candidates = [
+            e
+            for e in current.link_edges
+            if e != incoming and not (set(e.link_faces) & incoming_faces)
+        ]
+        if len(candidates) != 1:
+            break
+        edge = candidates[0]
+        next_vert = edge.other_vert(current)
+        if next_vert is None or next_vert in visited:
+            break
+        result.append(next_vert)
+        visited.add(next_vert)
+        incoming = edge
+        current = next_vert
+    return result
 
 
 def mean_vertex_normal(verts):
@@ -1731,7 +1810,52 @@ def fit_circle_to_loop(verts):
     return center, normal, sqrt(r_squared)
 
 
-def circle_verts_calculate(loops_data, distribution="ORIGINAL", fixed_circles=None, projected=False):
+class _FitPoint:
+    """Bare coordinate wrapper, lets computed points join a fit over vertices."""
+
+    __slots__ = ("co",)
+
+    def __init__(self, co):
+        self.co = co
+
+
+def seam_plane_for_loop(verts, mirror_planes):
+    """The mirror plane both open loop ends sit on, None when there isn't one."""
+    for plane_co, plane_no, threshold in mirror_planes:
+        on_plane = True
+        for v in (verts[0], verts[-1]):
+            limit = max(threshold, 1e-6)
+            if v.link_edges:
+                # same generosity as the seam healing, a drifted seam end
+                # still counts
+                limit = max(limit, min(e.calc_length() for e in v.link_edges) * 0.3)
+            if abs((v.co - plane_co).dot(plane_no)) > limit:
+                on_plane = False
+                break
+        if on_plane:
+            return plane_co, plane_no, threshold
+    return None
+
+
+def mirrored_fit_verts(verts, plane_co, plane_no, threshold):
+    """The loop vertices plus their mirror images across the plane.
+
+    A least squares fit over a mirror-symmetric point set comes out symmetric
+    itself: the circle center lands on the plane and its normal in it, so the
+    mirrored halves join into one circle instead of kinking at the seam.
+    Vertices already sitting on the plane reflect onto themselves and are not
+    duplicated.
+    """
+    points = list(verts)
+    limit = max(threshold, 1e-6)
+    for v in verts:
+        distance = (v.co - plane_co).dot(plane_no)
+        if abs(distance) > limit:
+            points.append(_FitPoint(v.co - plane_no * (2.0 * distance)))
+    return points
+
+
+def circle_verts_calculate(loops_data, distribution="ORIGINAL", fixed_circles=None, projected=False, mirror_planes=None):
     """Pull the vertices of loops onto a circle.
 
     Without fixed circles each loop gets its own best fit. With fixed_circles given
@@ -1775,7 +1899,14 @@ def circle_verts_calculate(loops_data, distribution="ORIGINAL", fixed_circles=No
                 continue
             n = n.normalized()
         else:
-            fit = fit_circle_to_loop(verts)
+            fit_verts = verts
+            if mirror_planes and not is_circular:
+                # an arc ending on a mirror plane must fit a circle that its
+                # mirror image completes: fit it together with that image
+                seam_plane = seam_plane_for_loop(verts, mirror_planes)
+                if seam_plane is not None:
+                    fit_verts = mirrored_fit_verts(verts, *seam_plane)
+            fit = fit_circle_to_loop(fit_verts)
             if fit is None:
                 continue
             c, n, r = fit
@@ -1841,6 +1972,14 @@ def evaluate_constraints(object, bmesh_edit=None, bmesh_eval=None, inverse_subdi
     cs = object.data.ft_custom_constraints
     target_offsets_all = []
     user_preferences = bpy.context.preferences.addons[__package__].preferences
+
+    # remember which vertices sit on a mirror seam before anything moves
+    mirror_data = []
+    mirror_seam_sets = []
+    if user_preferences.use_mirror:
+        mirror_data = utils.get_mirror_data(object)
+        if mirror_data:
+            mirror_seam_sets = utils.collect_mirror_seam_verts(bmesh_edit, mirror_data)
 
     for i, c in enumerate(cs):
         # skip disabled constraints
@@ -2021,13 +2160,60 @@ def evaluate_constraints(object, bmesh_edit=None, bmesh_eval=None, inverse_subdi
                 distribution="EVEN" if c.even_distribution else "ORIGINAL",
                 fixed_circles=fixed_circles,
                 projected=c.projected,
+                mirror_planes=mirror_data,
             )
 
         # evaluate curvature constraint
         elif c.constraint_type == "CURVATURE":
             # CURVATURE handles multi-loop format
+            loops_for_eval = constraint_verts_loops
+            movable_ranges = None
+            if c.curvature_context_steps > 0:
+                # extend open loops with surrounding vertices along the edge
+                # loops: they feed the curvature estimate, but never move -
+                # the assigned loop blends into its surroundings this way
+                edit_loops = constraint_verts_loops_edit_for_endpoints
+                if edit_loops is None:
+                    edit_loops = constraint_verts_loops
+                loops_for_eval = []
+                movable_ranges = []
+                for loop_index, loop_data in enumerate(constraint_verts_loops):
+                    verts_list = loop_data[0]
+                    is_circ = loop_data[1]
+                    prefix = []
+                    suffix = []
+                    edit_verts = edit_loops[loop_index][0]
+                    if not is_circ and len(edit_verts) >= 2:
+                        # walk in the edit cage, its topology carries the loops
+                        forbidden = set(edit_verts)
+                        walked_start = walk_loop_continuation(
+                            edit_verts[1], edit_verts[0], c.curvature_context_steps, forbidden
+                        )
+                        walked_end = walk_loop_continuation(
+                            edit_verts[-2],
+                            edit_verts[-1],
+                            c.curvature_context_steps,
+                            forbidden | set(walked_start),
+                        )
+                        prefix = list(reversed(walked_start))
+                        suffix = walked_end
+                        if c.works_on_subdivision and bmesh_eval is not None:
+                            prefix = [bmesh_eval.verts[v.index] for v in prefix]
+                            suffix = [bmesh_eval.verts[v.index] for v in suffix]
+                    loops_for_eval.append([prefix + list(verts_list) + suffix, is_circ])
+                    if is_circ:
+                        movable_ranges.append((0, len(verts_list)))
+                    else:
+                        # the loop's own end vertices stay anchored, even though
+                        # the context samples beyond them would let them move
+                        movable_ranges.append(
+                            (len(prefix) + 1, len(prefix) + len(verts_list) - 1)
+                        )
             target_offsets = curvature_calculate(
-                constraint_verts_loops, mode=c.curvature_mode
+                loops_for_eval,
+                mode=c.curvature_mode,
+                measure=c.curvature_measure,
+                movable_ranges=movable_ranges,
             )
 
         # evaluate space constraint
@@ -2051,6 +2237,12 @@ def evaluate_constraints(object, bmesh_edit=None, bmesh_eval=None, inverse_subdi
                     scale=1,
                 )
         utils.move_verts_to_targets(bmesh_edit, target_offsets, weight=user_preferences.step_weight)
+
+    # constraints must not pull the mirror seam apart - vertices that started
+    # on a mirror plane get put back onto it, they may only slide along it
+    if mirror_data:
+        utils.snap_mirror_seam_verts(bmesh_edit, mirror_data, mirror_seam_sets)
+
     # if there's inclination limit constraint, we need to recalculate normals of faces
     has_inclination_limit_constraint = any(c.constraint_type == "INCLINATION_LIMIT" for c in object.data.ft_custom_constraints)
     if has_inclination_limit_constraint:
@@ -2217,9 +2409,18 @@ def update_circle_fix_flags(self, context):
     )
     # one stored circle per loop - a single shared circle would suck all loops
     # onto the first one
+    mirror_planes = []
+    user_preferences = bpy.context.preferences.addons[__package__].preferences
+    if user_preferences.use_mirror:
+        mirror_planes = utils.get_mirror_data(context.active_object)
     self.fixed_circles.clear()
     for loop_data in loops:
-        fit = fit_circle_to_loop(loop_data[0])
+        fit_verts = loop_data[0]
+        if mirror_planes and not loop_data[1] and len(fit_verts) >= 2:
+            seam_plane = seam_plane_for_loop(fit_verts, mirror_planes)
+            if seam_plane is not None:
+                fit_verts = mirrored_fit_verts(fit_verts, *seam_plane)
+        fit = fit_circle_to_loop(fit_verts)
         if fit is not None:
             item = self.fixed_circles.add()
             item.center, item.normal, item.radius = fit
@@ -2491,6 +2692,37 @@ class CustomConstraint(bpy.types.PropertyGroup):
         description="Curvature profile the loop is pushed towards",
         update=update_constraint_data,
     )
+    curvature_measure: bpy.props.EnumProperty(
+        name="Measure",
+        default="LENGTH",
+        items=[
+            (
+                "LENGTH",
+                "Arc Length",
+                "True curvature, from angles and segment lengths."
+                "\nEven curvature regardless of how densely the loop is divided",
+            ),
+            (
+                "ANGLE",
+                "Angle",
+                "Turn angle per vertex only, segment lengths don't matter."
+                "\nDenser vertices then let the shape turn more tightly",
+            ),
+        ],
+        description="What gets evened out along the loop",
+        update=update_constraint_data,
+    )
+    curvature_context_steps: bpy.props.IntProperty(
+        name="Surroundings",
+        default=2,
+        min=0,
+        soft_max=10,
+        description="Also sample the curvature this many edges beyond the loop"
+        "\nends, following the edge loops. Only the assigned vertices move,"
+        "\nso the loop blends into its surroundings instead of averaging"
+        "\nonly itself. Zero samples the assigned loop alone",
+        update=update_constraint_data,
+    )
 
     # Line constraint properties
     fix_line: bpy.props.BoolProperty(
@@ -2643,6 +2875,8 @@ class VIEW3D_PT_final_topology_constraints(Panel):
 
             if ac.constraint_type == "CURVATURE":
                 layout.prop(ac, "curvature_mode")
+                layout.prop(ac, "curvature_measure")
+                layout.prop(ac, "curvature_context_steps")
 
             if ac.constraint_type == "LINE":
                 row = layout.row()
@@ -3282,6 +3516,114 @@ class CurveConstraintGizmoGroup(gizmos.TransformGizmoGroupBase, GizmoGroup):
         return [TargetCurveGizmoTarget(c.target_curve)]
 
 
+class FixedPlaneGizmoTarget:
+    """Gizmo adapter transforming a fixed plane constraint.
+
+    Arrows move the stored center and only show while the center is fixed,
+    dials tilt the stored normal and only show while the normal is fixed.
+    World gizmo input gets converted into the object's local space here.
+    """
+
+    def __init__(self, object, constraint):
+        self.object = object
+        self.constraint = constraint
+
+    def _world_normal(self):
+        normal = (
+            self.object.matrix_world.inverted().transposed().to_3x3()
+            @ Vector(self.constraint.normal)
+        )
+        if normal.length < 1e-12:
+            normal = Vector((0.0, 0.0, 1.0))
+        return normal.normalized()
+
+    def location(self):
+        return self.object.matrix_world @ Vector(self.constraint.center)
+
+    def orientation(self):
+        mode = gizmos.orientation_mode(bpy.context)
+        if mode == "GLOBAL":
+            return Matrix.Identity(3)
+        if mode == "LOCAL":
+            return self.object.matrix_world.to_quaternion().to_matrix()
+        z = self._world_normal()
+        x = z.orthogonal().normalized()
+        y = z.cross(x)
+        return Matrix((x, y, z)).transposed()
+
+    def translation_axes(self):
+        fixed = self.constraint.fix_center
+        return (fixed, fixed, fixed)
+
+    def rotation_axes(self):
+        if not self.constraint.fix_normal:
+            return (False, False, False)
+        # in the plane's own frame, spinning around the normal changes nothing
+        if gizmos.orientation_mode(bpy.context) == "NORMAL":
+            return (True, True, False)
+        return (True, True, True)
+
+    def snapshot(self):
+        return (
+            Vector(self.constraint.center),
+            Vector(self.constraint.normal),
+            self.orientation(),
+        )
+
+    def translate(self, snapshot, axis_index, distance):
+        world_offset = snapshot[2].col[axis_index] * distance
+        local_offset = self.object.matrix_world.inverted().to_3x3() @ world_offset
+        self.constraint.center = snapshot[0] + local_offset
+
+    def rotate(self, snapshot, axis_index, angle):
+        world_axis = snapshot[2].col[axis_index]
+        local_axis = self.object.matrix_world.inverted().to_3x3() @ world_axis
+        if local_axis.length < 1e-12:
+            return
+        rotation = Matrix.Rotation(angle, 3, local_axis.normalized())
+        self.constraint.normal = rotation @ snapshot[1]
+
+
+def get_active_fixed_plane_constraint(context):
+    """The active constraint, if it's an enabled plane one with a fixed part."""
+    ob = context.object
+    if not (ob and ob.type == "MESH" and ob.mode == "EDIT"):
+        return None, None
+    if not hasattr(ob.data, "ft_custom_constraints"):
+        return None, None
+    cs = ob.data.ft_custom_constraints
+    index = ob.data.ft_custom_constraints_index
+    if not (0 <= index < len(cs)):
+        return None, None
+    c = cs[index]
+    if (
+        c.constraint_type == "PLANE"
+        and c.enabled
+        and (c.fix_center or c.fix_normal)
+    ):
+        return ob, c
+    return None, None
+
+
+class PlaneConstraintGizmoGroup(gizmos.TransformGizmoGroupBase, GizmoGroup):
+    bl_idname = "OBJECT_GGT_ft_plane_constraint"
+    bl_label = "Plane Constraint Transform"
+    bl_space_type = "VIEW_3D"
+    bl_region_type = "WINDOW"
+    bl_options = {"3D", "PERSISTENT"}
+
+    @classmethod
+    def poll(cls, context):
+        ob, c = get_active_fixed_plane_constraint(context)
+        return c is not None
+
+    def get_targets(self, context):
+        ob, c = get_active_fixed_plane_constraint(context)
+        if c is None:
+            return []
+        return [FixedPlaneGizmoTarget(ob, c)]
+
+
 def get_active_fixed_circle_constraint(context):
     """The active constraint, if it's an enabled fixed circle one."""
     ob = context.object
@@ -3552,6 +3894,7 @@ classes = [
     VIEW3D_PT_final_topology_extra_operators,
     CircleConstraintGizmoGroup,
     CurveConstraintGizmoGroup,
+    PlaneConstraintGizmoGroup,
     # TransformConstraintGizmo,
 ]
 

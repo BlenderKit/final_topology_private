@@ -436,7 +436,8 @@ def get_mirror_data(object):
     mirror_modifiers = [mod for mod in object.modifiers if mod.type == "MIRROR"]
     mirror_data = []
     for m in mirror_modifiers:
-        if m.use_clip:
+        # clipping and merging both mean the seam belongs on the plane
+        if m.use_clip or m.use_mirror_merge:
             if m.mirror_object is not None:
                 # get the plane from the modifier
                 plane_co = m.mirror_object.matrix_world.translation
@@ -456,6 +457,51 @@ def get_mirror_data(object):
             if m.use_axis[2]:
                 mirror_data.append((plane_co, Vector((0, 0, 1)), m.merge_threshold))
     return mirror_data
+
+def collect_mirror_seam_verts(bm, mirror_data):
+    """Vertex indices belonging to each mirror seam, one set per plane.
+
+    Collected before the constraints move anything: seam membership must come
+    from where a vertex started, a single strong constraint step can carry it
+    far beyond the merge threshold within one iteration.
+
+    Besides vertices within the merge threshold, boundary vertices close to the
+    plane count as seam too - a seam vertex that has already drifted past the
+    threshold (its merging is broken, which is what we're fixing) gets captured
+    through the mesh boundary it sits on, and healed back onto the plane.
+    """
+    seam_sets = []
+    for plane_co, plane_no, threshold in mirror_data:
+        limit = max(threshold, 1e-6)
+        seam = set()
+        for v in bm.verts:
+            distance = abs((v.co - plane_co).dot(plane_no))
+            if distance <= limit:
+                seam.add(v.index)
+            elif v.is_boundary and v.link_edges:
+                # generous capture for drifted seam verts, but never further
+                # than a fraction of the local edge length, so open borders
+                # elsewhere in the mesh are left alone
+                edge_scale = min(e.calc_length() for e in v.link_edges)
+                if distance <= max(limit, edge_scale * 0.3):
+                    seam.add(v.index)
+        seam_sets.append(seam)
+    return seam_sets
+
+
+def snap_mirror_seam_verts(bm, mirror_data, seam_sets):
+    """Put the collected seam vertices back onto their mirror planes.
+
+    Run after constraints moved vertices, so they can't pull the mirror seam
+    apart and break the merging - they may still slide seam vertices along the
+    plane, and a pull toward a target off the plane turns into a slide toward
+    the target's projection onto it.
+    """
+    for (plane_co, plane_no, threshold), indices in zip(mirror_data, seam_sets):
+        for index in indices:
+            v = bm.verts[index]
+            v.co -= plane_no * (v.co - plane_co).dot(plane_no)
+
 
 #TODO: Test mirror and if it works as is, remove this one.
 # it seems to not work that well, since it's not directly part of the inverse subdivide algo.
