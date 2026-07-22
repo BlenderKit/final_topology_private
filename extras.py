@@ -164,6 +164,104 @@ def calculate_curve_length(source_curve, curve_snapping):
         curve_length += (end_co - start_co).length
     return curve_length
 
+def sample_curve_polyline(source_curve, curve_snapping, samples_per_segment=24):
+    """Dense world space polyline of the curve's first spline.
+
+    Bezier splines are sampled from their true segments - the display
+    tessellation is too coarse, and walking it while scaling targets by the
+    smooth spline length drifted vertices along the curve a little on every
+    iteration. Other spline types fall back to the evaluated tessellation.
+
+    Returns (points, cyclic), points already flattened for plane projection.
+    """
+    matrix = source_curve.matrix_world
+    spline = source_curve.data.splines[0]
+    cyclic = spline.use_cyclic_u
+    points = []
+    if spline.type == "BEZIER" and len(spline.bezier_points) >= 2:
+        bez = spline.bezier_points
+        count = len(bez)
+        segments = count if cyclic else count - 1
+        for s in range(segments):
+            a = bez[s]
+            b = bez[(s + 1) % count]
+            segment = geometry.interpolate_bezier(
+                a.co, a.handle_right, b.handle_left, b.co, samples_per_segment + 1
+            )
+            if s > 0:
+                segment = segment[1:]
+            points.extend(segment)
+        if cyclic and len(points) > 1:
+            # the last sample equals the first point
+            points = points[:-1]
+        points = [matrix @ p for p in points]
+    else:
+        depsgraph = bpy.context.evaluated_depsgraph_get()
+        bm_curve = utils.get_evaluated_bm(source_curve, depsgraph)
+        points = [matrix @ v.co for v in bm_curve.verts]
+    points = [eval_point(p, curve_snapping, source_curve) for p in points]
+    return points, cyclic
+
+
+def polyline_arc_table(points, cyclic):
+    """Cumulative arc lengths per point and the total length."""
+    table = [0.0]
+    for i in range(1, len(points)):
+        table.append(table[-1] + (points[i] - points[i - 1]).length)
+    total = table[-1]
+    if cyclic:
+        total += (points[0] - points[-1]).length
+    return table, total
+
+
+def polyline_point_at(points, table, total, cyclic, distance):
+    """Position at an arc length distance, wrapping on cyclic polylines."""
+    if cyclic:
+        distance = distance % total
+    else:
+        distance = max(0.0, min(distance, total))
+    segment = bisect_right(table, distance) - 1
+    segment = max(0, min(segment, len(points) - (1 if cyclic else 2)))
+    a = points[segment]
+    b = points[(segment + 1) % len(points)]
+    span = (b - a).length
+    t = 0.0 if span < 1e-12 else (distance - table[segment]) / span
+    return a.lerp(b, min(t, 1.0))
+
+
+def polyline_closest_arc(points, table, total, cyclic, co):
+    """Arc length position of the point on the polyline closest to co.
+
+    The exact spot on the neighbouring segments, not the nearest sample - a
+    quantized anchor made the whole distribution jump as vertices moved.
+    """
+    best_index = 0
+    best_sq = None
+    for i, p in enumerate(points):
+        d_sq = (p - co).length_squared
+        if best_sq is None or d_sq < best_sq:
+            best_sq = d_sq
+            best_index = i
+    best_arc = table[best_index]
+    count = len(points)
+    for segment in ((best_index - 1) % count, best_index):
+        if not cyclic and (segment < 0 or segment >= count - 1):
+            continue
+        a = points[segment]
+        b = points[(segment + 1) % count]
+        ab = b - a
+        span_sq = ab.length_squared
+        if span_sq < 1e-18:
+            continue
+        t = max(0.0, min(1.0, (co - a).dot(ab) / span_sq))
+        p = a + ab * t
+        d_sq = (p - co).length_squared
+        if d_sq <= best_sq:
+            best_sq = d_sq
+            best_arc = table[segment] + ab.length * t
+    return best_arc
+
+
 def to_curve_verts_calculate(
     loop,
     curve_snapping="PROJECT_PLANE",
@@ -173,196 +271,96 @@ def to_curve_verts_calculate(
     normal=None,
     edit_loop_for_endpoints=None,
 ):
-    """Calculate new positions for vertices to snap to the closest point on a curve, Return a dictionary with the new positions"""
-    target_offsets = {}
-    # print(loop)
-    loop_closed = loop[1]
+    """Snap the loop vertices onto the curve, spread by arc length.
 
-    curve_world_matrix = source_curve.matrix_world
+    Every vertex gets a fraction along the loop - its own arc position for
+    the original distribution, an even split otherwise - and lands at that
+    fraction of the curve's length. All lengths are measured on one densely
+    sampled polyline of the true curve, so the placement stays consistent
+    between iterations instead of slipping along the curve.
+    """
+    target_offsets = {}
+    loop_verts = loop[0]
+    loop_closed = loop[1]
+    if source_curve is None or len(loop_verts) < 2:
+        return target_offsets
 
     object_world_matrix = bpy.context.active_object.matrix_world
-    # Local Z-axis vector
-    local_z = Vector((0, 0, 1))
+    points, curve_cyclic = sample_curve_polyline(source_curve, curve_snapping)
+    if len(points) < 2:
+        return target_offsets
+    table, total = polyline_arc_table(points, curve_cyclic)
+    if total < 1e-9:
+        return target_offsets
 
-    # Transform the local Z-axis vector by the object's rotation matrix
-    curve_plane_normal = source_curve.rotation_euler.to_matrix() @ local_z
-    curve_plane_normal.normalize()
-    # print("curve_plane_normal", curve_plane_normal)
-    # KD was not passed, build it
-    if 1:  # kd is None:
-        kd = build_kd_curve_cache(
-            source_curve,
-            endpoints_only=not loop_closed,
-            flatten=curve_snapping == "PROJECT_PLANE",
-        )
-
-    # TODO MOVE THIS TO CACHE
-    depsgraph = bpy.context.evaluated_depsgraph_get()
-    bmesh_curve = utils.get_evaluated_bm(source_curve, depsgraph)
-    
-    #curve_length = calculate_curve_length(source_curve, curve_snapping)
-    # use blender's original function to calculate curve length
-    curve_length =  source_curve.data.splines[0].calc_length() * source_curve.scale.x
-
-    
-    # calculate loop length
-    loop_length = 0
-    for i, vert in enumerate(loop[0]):
-        if i == 0:
-            continue
-        loop_length += (vert.co - loop[0][i - 1].co).length
-    # cyclic loops have one more edge
-    if loop_closed:
-        loop_length += (loop[0][0].co - loop[0][-1].co).length
-
-    # Find the closest point on the curve for each input vertex
-    direction = 1
-    distance_traveled = 0
-    target_distance = 0
-    for i, vert in enumerate(loop[0]):
-        # For first and last vertices in open loops with subdivision,
-        # use edit mesh vertex positions as reference
-        use_edit_vert_for_endpoint = (
+    # reference positions in world space, flattened for plane projection;
+    # open loop ends of a subdivision constraint anchor at the edit vertices
+    references = []
+    offset_keys = []
+    for i, vert in enumerate(loop_verts):
+        use_edit_vert = (
             edit_loop_for_endpoints is not None
             and not loop_closed
-            and (i == 0 or i == len(loop[0]) - 1)
+            and (i == 0 or i == len(loop_verts) - 1)
         )
-
-        if use_edit_vert_for_endpoint:
+        if use_edit_vert:
             edit_vert = edit_loop_for_endpoints[0][i]
-            reference_co = eval_point(
-                object_world_matrix @ edit_vert.co, curve_snapping, source_curve
+            references.append(
+                eval_point(object_world_matrix @ edit_vert.co, curve_snapping, source_curve)
             )
-            vert_index_for_offset = edit_vert.index
+            offset_keys.append(edit_vert.index)
         else:
-            reference_co = eval_point(
-                object_world_matrix @ vert.co, curve_snapping, source_curve
+            references.append(
+                eval_point(object_world_matrix @ vert.co, curve_snapping, source_curve)
             )
-            vert_index_for_offset = vert.index
+            offset_keys.append(vert.index)
 
-        if i == 0:
-            next_point_index = i + 1
-            if next_point_index >= len(loop[0]):
-                next_point_index = 0
-
-            reference_co1 = eval_point(
-                object_world_matrix @ loop[0][next_point_index].co,
-                curve_snapping,
-                source_curve,
+    # each vertex's fraction of the way along the loop
+    if curve_distribution == "ORIGINAL":
+        cumulative = [0.0]
+        for i in range(1, len(loop_verts)):
+            cumulative.append(
+                cumulative[-1] + (loop_verts[i].co - loop_verts[i - 1].co).length
             )
-            reference_co2 = eval_point(
-                object_world_matrix @ loop[0][i - 1].co, curve_snapping, source_curve
-            )
+        loop_total = cumulative[-1]
+        if loop_closed:
+            loop_total += (loop_verts[0].co - loop_verts[-1].co).length
+        if loop_total < 1e-9:
+            return target_offsets
+        fractions = [c / loop_total for c in cumulative]
+    else:
+        steps = len(loop_verts) - 1 + (1 if loop_closed else 0)
+        fractions = [i / steps for i in range(len(loop_verts))]
 
-        if i == 0:
-            # find first point on the curve for closed loops
-            if loop_closed:
-                co, index, dist = kd.find(reference_co)
-                target_offsets[vert_index_for_offset] = co - reference_co
-                last_index = index
-                next_point_index = index + 1
-                if next_point_index >= len(bmesh_curve.verts):
-                    next_point_index = 0
-                next_point = eval_point(
-                    curve_world_matrix @ bmesh_curve.verts[next_point_index].co,
-                    curve_snapping,
-                    source_curve,
-                )
-
-                # estimate which direction to go by angle - this seems to be wrong by now
-                
-                angle1 = (reference_co1 - reference_co).angle(next_point - co)
-                angle2 = (reference_co2 - reference_co).angle(next_point - co)
-                # print(angle1, angle2)
-                if angle1 > angle2:
-                    direction = -1
-            else:
-                # find closest end point of the curve for open loops
-                curve_start = eval_point(
-                    curve_world_matrix @ bmesh_curve.verts[0].co,
-                    curve_snapping,
-                    source_curve,
-                )
-                curve_end = eval_point(
-                    curve_world_matrix @ bmesh_curve.verts[-1].co,
-                    curve_snapping,
-                    source_curve,
-                )
-
-                dist_start = (reference_co - curve_start).length
-                dist_end = (reference_co - curve_end).length
-                if dist_start < dist_end:
-                    co = curve_start
-                    index = 0
-                else:
-                    co = curve_end
-                    index = len(bmesh_curve.verts) - 1
-                    direction = -1
-
-                last_index = index
-
-            start_point = co
-            target_offsets[vert_index_for_offset] = co - reference_co
-
+    if loop_closed:
+        # anchor at the exact closest curve position of the first vertex, and
+        # follow the loop's own travel direction along the curve
+        start_arc = polyline_closest_arc(points, table, total, curve_cyclic, references[0])
+        direction = 1
+        probe = max(total * 1e-3, 1e-9)
+        tangent = polyline_point_at(
+            points, table, total, curve_cyclic, start_arc + probe
+        ) - polyline_point_at(points, table, total, curve_cyclic, start_arc)
+        forward = references[1] - references[0]
+        backward = references[-1] - references[0]
+        if (
+            tangent.length > 1e-12
+            and forward.length > 1e-12
+            and backward.length > 1e-12
+            and forward.angle(tangent) > backward.angle(tangent)
+        ):
+            direction = -1
+    else:
+        # an open loop spans the whole curve, starting at the nearer end
+        if (references[0] - points[0]).length <= (references[0] - points[-1]).length:
+            start_arc, direction = 0.0, 1
         else:
-            # iterate through rest of points of spline depending on distribution type
-            if curve_distribution == "EVEN":
-                target_distance += curve_length / (len(loop[0]) - 1 + loop_closed)
-            if curve_distribution == "ORIGINAL":
-                ratio = curve_length / loop_length
-                target_distance += ratio * (vert.co - loop[0][i - 1].co).length
+            start_arc, direction = total, -1
 
-            for i_curve_offset in range(0, len(bmesh_curve.verts)):
-                # Get the end point of current segment to check
-                check_index = last_index + direction
-                
-                if check_index >= len(bmesh_curve.verts):
-                    if not loop_closed:  # Finish for not closed loops
-                        end_point = eval_point(
-                            curve_world_matrix @ bmesh_curve.verts[-1].co,
-                            curve_snapping,
-                            source_curve,
-                        )
-                        target_offsets[vert_index_for_offset] = end_point - reference_co
-                        break
-                    check_index = 0  # Wrap around for cyclic curves
-                    
-                if check_index < 0:
-                    if not loop_closed and i > 1:  # Finish for not closed loops
-                        end_point = eval_point(
-                            curve_world_matrix @ bmesh_curve.verts[0].co,
-                            curve_snapping,
-                            source_curve,
-                        )
-                        target_offsets[vert_index_for_offset] = end_point - reference_co
-                        break
-                    check_index = len(bmesh_curve.verts) - 1  # Wrap around for cyclic curves
-
-                end_point = eval_point(
-                    curve_world_matrix @ bmesh_curve.verts[check_index].co,
-                    curve_snapping,
-                    source_curve,
-                )
-
-                segment_length = (end_point - start_point).length
-                distance_would_be_traveled = distance_traveled + segment_length
-                
-                if distance_would_be_traveled >= target_distance:
-                    # found the segment, let's interpolate
-                    ratio = (target_distance - distance_traveled) / segment_length
-                    co = start_point.lerp(end_point, ratio)
-                    target_offsets[vert_index_for_offset] = co - reference_co
-                    distance_traveled = target_distance
-                    start_point = co
-                    # Don't update last_index - we're still in this segment
-                    break
-                else:
-                    # Move to next segment
-                    distance_traveled += segment_length
-                    start_point = end_point
-                    last_index = check_index
-
-        # Store the offset for each vertex
+    for fraction, reference, key in zip(fractions, references, offset_keys):
+        distance = start_arc + direction * fraction * total
+        co = polyline_point_at(points, table, total, curve_cyclic, distance)
+        target_offsets[key] = co - reference
 
     return target_offsets
 
@@ -1342,8 +1340,10 @@ def calculate_joined_normal(c, constraint_verts_loops):
             joined_normal += loop_normal
         
         joined_normal.normalize()
-        # Store for next frame consistency
-        c.normal = joined_normal
+        # Store for next frame consistency - but never overwrite a fixed
+        # normal, the user owns that value
+        if not c.fix_normal:
+            c.normal = joined_normal
     return joined_normal, joined_center
 
 def check_constraints_cache(object):
@@ -1514,6 +1514,17 @@ def curvature_loop_samples(verts, is_circular, measure="LENGTH"):
         # endpoints have no curvature defined, they anchor the loop
         indices = range(1, count - 1)
 
+    # vertex normals mean nothing on wire vertices without any faces - Blender
+    # fills them from the normalized vertex position, which points anywhere.
+    # The loop's own plane crossed with the local tangent gives the in-plane
+    # curve normal instead, so a flat wire loop is handled within its plane.
+    wire_plane_normal = None
+    if count >= 3 and any(not getattr(v, "link_faces", True) for v in verts):
+        _, wire_plane_normal = utils.estimate_best_fit_plane(verts, "best_fit")
+        wire_plane_normal = Vector(wire_plane_normal)
+        if wire_plane_normal.length_squared < 0.5:
+            wire_plane_normal = None
+
     samples = []
     for i in indices:
         # negative index wraps to the last vertex on circular loops
@@ -1526,7 +1537,10 @@ def curvature_loop_samples(verts, is_circular, measure="LENGTH"):
         if h1 < 1e-9 or h2 < 1e-9:
             continue
 
-        normal = verts[i].normal.copy()
+        if wire_plane_normal is not None and not getattr(verts[i], "link_faces", True):
+            normal = wire_plane_normal.cross(next_co - prev_co)
+        else:
+            normal = verts[i].normal.copy()
         if normal.length_squared < 1e-12:
             continue
         normal.normalize()
@@ -1702,7 +1716,14 @@ def mean_vertex_normal(verts):
     return normal.normalized()
 
 
-def line_verts_calculate(loops_data, distribution="ORIGINAL", fixed_lines=None, projected=False):
+def line_verts_calculate(
+    loops_data,
+    distribution="ORIGINAL",
+    fixed_lines=None,
+    projected=False,
+    draw_matrix=None,
+    draw_color=None,
+):
     """Pull the vertices of open loops onto a straight line.
 
     The line runs from the first to the last vertex of each loop, so the ends stay
@@ -1751,6 +1772,10 @@ def line_verts_calculate(loops_data, distribution="ORIGINAL", fixed_lines=None, 
         if line_length < 1e-9:
             continue
         direction /= line_length
+
+        if draw_matrix is not None and draw_color is not None:
+            # the target line itself
+            draw.add_line(draw_matrix @ line_start, draw_matrix @ line_end, draw_color)
 
         for i, v in enumerate(verts):
             if distribution == "EVEN":
@@ -1855,7 +1880,15 @@ def mirrored_fit_verts(verts, plane_co, plane_no, threshold):
     return points
 
 
-def circle_verts_calculate(loops_data, distribution="ORIGINAL", fixed_circles=None, projected=False, mirror_planes=None):
+def circle_verts_calculate(
+    loops_data,
+    distribution="ORIGINAL",
+    fixed_circles=None,
+    projected=False,
+    mirror_planes=None,
+    draw_matrix=None,
+    draw_color=None,
+):
     """Pull the vertices of loops onto a circle.
 
     Without fixed circles each loop gets its own best fit. With fixed_circles given
@@ -1914,6 +1947,16 @@ def circle_verts_calculate(loops_data, distribution="ORIGINAL", fixed_circles=No
         u = n.orthogonal().normalized()
         w = n.cross(u)
 
+        if draw_matrix is not None and draw_color is not None:
+            # the target circle itself
+            previous = None
+            for i in range(49):
+                a = 2.0 * pi * i / 48
+                point = draw_matrix @ (c + (u * cos(a) + w * sin(a)) * r)
+                if previous is not None:
+                    draw.add_line(previous, point, draw_color)
+                previous = point
+
         # angle of each vertex around the circle, unwrapped along the loop so the
         # sequence carries the winding direction instead of jumping at +-pi
         angles = []
@@ -1965,6 +2008,214 @@ def circle_verts_calculate(loops_data, distribution="ORIGINAL", fixed_circles=No
     return target_offsets
 
 
+def thickness_calculate(
+    bm,
+    verts,
+    use_min=True,
+    min_thickness=0.005,
+    use_max=False,
+    max_thickness=0.02,
+    ray_length=0.05,
+    draw_matrix=None,
+    draw_alpha=0.4,
+):
+    """Keep the wall thickness under each vertex within the given bounds.
+
+    Thickness is measured by a ray cast from the vertex inwards along its
+    normal against the mesh itself. The ray starts a hair inside the surface
+    and steps past faces that contain the very vertex it started from, so the
+    corner geometry around the start can't read as a zero-thickness hit.
+    Walls thicker than ray_length don't get measured and don't react.
+
+    Vertices on too thin walls get pushed outwards along their normal, on too
+    thick walls pulled inwards - by half the deficit, since the far side of
+    the wall is usually constrained too and contributes the other half.
+
+    With draw_matrix given, the surrounding faces are added to the overlay,
+    colored by the deviation: red grading in for too thin, green within the
+    bounds, blue grading in for too thick, transparent where nothing was in
+    reach of the ray.
+
+    Returns a dictionary mapping vertex indices to offset vectors.
+    """
+    from mathutils.bvhtree import BVHTree
+
+    bvh = BVHTree.FromBMesh(bm)
+    bm.faces.ensure_lookup_table()
+    epsilon = 1e-5
+
+    def measuring_normals(v, sharp_cos=0.7071):
+        """Testing normals for a vertex, built from its surrounding faces.
+
+        Faces of roughly the same orientation group into one larger surface
+        and share its mean normal. Where faces meet at a sharp angle - box
+        edges and corners - each side keeps its own normal, so a corner of a
+        flat plate measures the plate's real thickness straight through it,
+        instead of a slanted reading along the averaged diagonal normal.
+        """
+        clusters = []
+        for f in v.link_faces:
+            face_normal = f.normal
+            if face_normal.length_squared < 1e-12:
+                continue
+            for cluster in clusters:
+                if face_normal.dot(cluster.normalized()) > sharp_cos:
+                    cluster += face_normal
+                    break
+            else:
+                if len(clusters) < 4:
+                    clusters.append(face_normal.copy())
+        if clusters:
+            return [c.normalized() for c in clusters]
+        # wire vertex without faces, the vertex normal is all there is
+        if v.normal.length_squared > 1e-12:
+            return [v.normal.normalized()]
+        return []
+
+    def cast_through(v, direction):
+        """Distance to the mesh along direction, skipping the own corner."""
+        origin = v.co + direction * epsilon
+        traveled = epsilon
+        for _ in range(4):
+            remaining = ray_length - traveled
+            if remaining <= 0:
+                return None
+            location, _, face_index, distance = bvh.ray_cast(origin, direction, remaining)
+            if location is None:
+                return None
+            if v in bm.faces[face_index].verts:
+                # grazed a face of its own corner, step just past it
+                advance = distance + epsilon
+                origin = origin + direction * advance
+                traveled += advance
+                continue
+            return traveled + distance
+        return None
+
+    thickness = {}
+    wall_directions = {}
+    for v in verts:
+        # the wall is the nearest material any of the surface groups finds.
+        # Inward rays are authoritative; outward ones only cover flipped
+        # normals, so a narrow air cavity can't get mistaken for the wall.
+        measured = None
+        wall_direction = None
+        directions = measuring_normals(v)
+        for normal in directions:
+            hit = cast_through(v, -normal)
+            if hit is not None and (measured is None or hit < measured):
+                measured = hit
+                wall_direction = -normal
+        if measured is None:
+            for normal in directions:
+                hit = cast_through(v, normal)
+                if hit is not None and (measured is None or hit < measured):
+                    measured = hit
+                    wall_direction = normal
+        thickness[v.index] = measured
+        if wall_direction is not None:
+            wall_directions[v.index] = wall_direction
+
+    target_offsets = {}
+    for v in verts:
+        measured = thickness.get(v.index)
+        if measured is None or v.index not in wall_directions:
+            continue
+        # push away from the opposing surface to thicken, toward it to thin
+        away = -wall_directions[v.index]
+        if use_min and measured < min_thickness:
+            target_offsets[v.index] = away * ((min_thickness - measured) * 0.5)
+        elif use_max and measured > max_thickness:
+            target_offsets[v.index] = away * (-(measured - max_thickness) * 0.5)
+
+    if draw_matrix is not None:
+        def vert_color(vert):
+            measured = thickness.get(vert.index)
+            if measured is None:
+                return (0.0, 0.0, 0.0, 0.0)
+            if use_min and measured < min_thickness:
+                ratio = max(measured / min_thickness, 0.0)
+                return (1.0, ratio * 0.8, 0.0, draw_alpha)
+            if use_max and measured > max_thickness:
+                over = min((measured - max_thickness) / max_thickness, 1.0)
+                return (0.0, 1.0 - over * 0.8, 0.4 + over * 0.6, draw_alpha)
+            return (0.0, 1.0, 0.0, draw_alpha)
+
+        faces = {f for v in verts if v.index in thickness for f in v.link_faces}
+        for f in faces:
+            face_verts = f.verts
+            colors = [vert_color(fv) for fv in face_verts]
+            if all(c[3] == 0.0 for c in colors):
+                continue
+            base = draw_matrix @ face_verts[0].co
+            for i in range(1, len(face_verts) - 1):
+                draw.add_colored_tri(
+                    (base, draw_matrix @ face_verts[i].co, draw_matrix @ face_verts[i + 1].co),
+                    (colors[0], colors[i], colors[i + 1]),
+                )
+
+        # the testing rays themselves: the ray that found the wall in the
+        # vertex's deviation color, the other tested directions as grey stubs
+        stub = min(ray_length, 1.5 * max(max_thickness if use_max else min_thickness, 1e-4))
+        for v in verts:
+            start = draw_matrix @ v.co
+            wall_direction = wall_directions.get(v.index)
+            measured = thickness.get(v.index)
+            if wall_direction is not None and measured is not None:
+                col = vert_color(v)
+                draw.add_line(
+                    start,
+                    draw_matrix @ (v.co + wall_direction * measured),
+                    (col[0], col[1], col[2], min(1.0, draw_alpha * 2.0)),
+                )
+            for normal in measuring_normals(v):
+                inward = -normal
+                if wall_direction is not None and (
+                    (wall_direction - inward).length < 1e-6
+                    or (wall_direction - normal).length < 1e-6
+                ):
+                    continue
+                draw.add_line(
+                    start,
+                    draw_matrix @ (v.co + inward * stub),
+                    (0.55, 0.55, 0.55, draw_alpha * 0.6),
+                )
+
+    return target_offsets
+
+
+def draw_loop_deviation(loops_data, target_offsets, matrix, alpha):
+    """Gradient along the loops showing how far each vertex still is from
+    satisfying the constraint - green settled, through yellow to red.
+
+    The pending correction offsets are the deviation: they shrink to zero as
+    the constraint converges, so the loop visibly cools down while it solves.
+    """
+    for loop_data in loops_data:
+        verts = loop_data[0]
+        is_circular = loop_data[1]
+        if len(verts) < 2:
+            continue
+        total = 0.0
+        for i in range(1, len(verts)):
+            total += (verts[i].co - verts[i - 1].co).length
+        # a correction of a quarter edge length reads as fully red
+        scale = max(total / max(len(verts) - 1, 1) * 0.25, 1e-9)
+        colors = []
+        for v in verts:
+            offset = target_offsets.get(v.index)
+            s = min((offset.length if offset is not None else 0.0) / scale, 1.0)
+            colors.append((min(2.0 * s, 1.0), min(2.0 * (1.0 - s), 1.0), 0.0, alpha))
+        count = len(verts)
+        last = count if is_circular else count - 1
+        for i in range(last):
+            j = (i + 1) % count
+            draw.add_colored_line(
+                (matrix @ verts[i].co, matrix @ verts[j].co),
+                (colors[i], colors[j]),
+            )
+
+
 def evaluate_constraints(object, bmesh_edit=None, bmesh_eval=None, inverse_subdivide_prep=None):
     global constraints_cache
     # separate caching for performance
@@ -2009,7 +2260,10 @@ def evaluate_constraints(object, bmesh_edit=None, bmesh_eval=None, inverse_subdi
         if len(constraint_elements_edit) == 0:
             continue
 
-        if c.constraint_type == "INCLINATION_LIMIT":
+        if c.constraint_type in ("INCLINATION_LIMIT", "INVERSE_SUBDIVIDE", "THICKNESS"):
+            # face and point domain constraints don't use the loop format -
+            # wrapping their flat element lists as loops would crash the
+            # subdivision mapping below
             constraint_verts_loops = []
         else:
             # All edge-based constraints receive multi-loop format: [[verts1, is_circular1], [verts2, is_circular2], ...]
@@ -2118,6 +2372,35 @@ def evaluate_constraints(object, bmesh_edit=None, bmesh_eval=None, inverse_subdi
                     normal_offset=c.invsubdiv_normal_offset,
                 )
 
+        # evaluate thickness constraint
+        elif c.constraint_type == "THICKNESS":
+            measure_bm = bmesh_edit
+            measure_verts = constraint_elements_edit
+            # ray directions come from the vertex normals, keep them in step
+            # with the moves of the previous iterations
+            bmesh_edit.normal_update()
+            if c.works_on_subdivision and bmesh_eval is not None:
+                bmesh_eval.verts.ensure_lookup_table()
+                measure_bm = bmesh_eval
+                measure_verts = [bmesh_eval.verts[v.index] for v in constraint_elements_edit]
+            draw_matrix = None
+            if (
+                user_preferences.enable_draw_constraints
+                and cs[object.data.ft_custom_constraints_index] == c
+            ):
+                draw_matrix = object.matrix_world
+            target_offsets = thickness_calculate(
+                measure_bm,
+                measure_verts,
+                use_min=c.thickness_use_min,
+                min_thickness=c.thickness_min,
+                use_max=c.thickness_use_max,
+                max_thickness=c.thickness_max,
+                ray_length=c.thickness_ray_length,
+                draw_matrix=draw_matrix,
+                draw_alpha=0.4 * user_preferences.overlays_alpha,
+            )
+
         # evaluate inclination limit constraint
         elif c.constraint_type == "INCLINATION_LIMIT":
             target_offsets = inclination_limit_calculate(
@@ -2139,11 +2422,21 @@ def evaluate_constraints(object, bmesh_edit=None, bmesh_eval=None, inverse_subdi
             fixed_lines = None
             if c.fix_line and len(c.fixed_lines) > 0:
                 fixed_lines = [(Vector(item.start), Vector(item.end)) for item in c.fixed_lines]
+            draw_matrix = None
+            draw_color = None
+            if (
+                user_preferences.enable_draw_constraints
+                and cs[object.data.ft_custom_constraints_index] == c
+            ):
+                draw_matrix = object.matrix_world
+                draw_color = (c.color[0], c.color[1], c.color[2], 0.9)
             target_offsets = line_verts_calculate(
                 constraint_verts_loops,
                 distribution="EVEN" if c.even_distribution else "ORIGINAL",
                 fixed_lines=fixed_lines,
                 projected=c.projected,
+                draw_matrix=draw_matrix,
+                draw_color=draw_color,
             )
 
         # evaluate circle constraint
@@ -2155,12 +2448,22 @@ def evaluate_constraints(object, bmesh_edit=None, bmesh_eval=None, inverse_subdi
                     (Vector(item.center), Vector(item.normal), item.radius)
                     for item in c.fixed_circles
                 ]
+            draw_matrix = None
+            draw_color = None
+            if (
+                user_preferences.enable_draw_constraints
+                and cs[object.data.ft_custom_constraints_index] == c
+            ):
+                draw_matrix = object.matrix_world
+                draw_color = (c.color[0], c.color[1], c.color[2], 0.9)
             target_offsets = circle_verts_calculate(
                 constraint_verts_loops,
                 distribution="EVEN" if c.even_distribution else "ORIGINAL",
                 fixed_circles=fixed_circles,
                 projected=c.projected,
                 mirror_planes=mirror_data,
+                draw_matrix=draw_matrix,
+                draw_color=draw_color,
             )
 
         # evaluate curvature constraint
@@ -2224,6 +2527,20 @@ def evaluate_constraints(object, bmesh_edit=None, bmesh_eval=None, inverse_subdi
                 interpolation=c.space_interpolation,
                 method=c.space_method,
                 step_weight=user_preferences.step_weight,
+            )
+
+        # gradient along the active constraint's loops: how far each vertex
+        # still is from satisfying it
+        if (
+            user_preferences.enable_draw_constraints
+            and constraint_verts_loops
+            and cs[object.data.ft_custom_constraints_index] == c
+        ):
+            draw_loop_deviation(
+                constraint_verts_loops,
+                target_offsets,
+                object.matrix_world,
+                0.9 * user_preferences.overlays_alpha,
             )
 
         # move vertices to new locations
@@ -2308,9 +2625,12 @@ class FunTopologyDecimateOperator(bpy.types.Operator):
 
 def update_constraint_index(self, context):
     # select constraint vertices
-    constraint = context.object.data.ft_custom_constraints[
-        context.object.data.ft_custom_constraints_index
-    ]
+    constraints = context.object.data.ft_custom_constraints
+    index = context.object.data.ft_custom_constraints_index
+    if not (0 <= index < len(constraints)):
+        # e.g. -1 after the last constraint was deleted
+        return
+    constraint = constraints[index]
     bm = bmesh.from_edit_mesh(context.object.data)
     draw.clear_draw_list()
     domain = get_constraint_domain_type(constraint.constraint_type)
@@ -2327,45 +2647,157 @@ def update_constraint_index(self, context):
     except:
         pass
 
-def update_constraint_data(self, context):
+def clear_constraints_cache():
     global constraints_cache
     constraints_cache = []
 
 
-def update_plane_fix_flags(self, context):
-    """Recalculate center/normal when fix flags are toggled on"""
+_suppress_undo_push = False
+
+
+def push_constraint_undo(message):
+    """Record an undoable checkpoint for a constraint action.
+
+    The constraint list lives in ID properties, which edit mode undo steps do
+    not record - only object mode (memfile) steps do. So the checkpoint hops
+    to object mode for a full snapshot and returns. Undoing a constraint
+    action then takes two undo steps: the first lands on the checkpoint in
+    object mode, the second restores the state before the action. Mesh edits
+    made in between survive, they live in the edit mode step chain.
+
+    Skipped while one of the constraint operators runs - the operator pushes a
+    single checkpoint for the whole action itself, and the property updates
+    fired along the way must not add more.
+    """
+    if _suppress_undo_push:
+        return
+    try:
+        if bpy.context.mode == "EDIT_MESH":
+            bpy.ops.object.mode_set(mode="OBJECT")
+            bpy.ops.ed.undo_push(message=message)
+            bpy.ops.object.mode_set(mode="EDIT")
+            bpy.ops.ed.undo_push(message=message)
+        else:
+            bpy.ops.ed.undo_push(message=message)
+    except Exception:
+        pass
+
+
+def update_constraint_data(self, context):
+    clear_constraints_cache()
+    # constraint property edits happen in edit mode, where Blender's own
+    # property undo push doesn't reliably record them
+    push_constraint_undo("Change Constraint")
+
+
+def update_constraint_type(self, context):
+    """Type changes can move the constraint to another attribute domain -
+    convert the stored attribute along, so the assignment survives the switch
+    instead of crashing the evaluation with a missing layer."""
+    clear_constraints_cache()
+    convert_constraint_attribute_domain(self, context)
+    push_constraint_undo("Change Constraint Type")
+
+
+def convert_constraint_attribute_domain(self, context):
+    ob = context.object
+    if ob is None or ob.type != "MESH" or ob.mode != "EDIT" or not self.attribute_name:
+        return
+    mesh = ob.data
+    attribute = mesh.attributes.get(self.attribute_name)
+    domain = get_constraint_domain_type(self.constraint_type)
+    if attribute is None or domain is None or attribute.domain == domain:
+        return
+
+    # collect the marked vertices under the old domain
+    bm = bmesh.from_edit_mesh(mesh)
+    marked_verts = set()
+    if attribute.domain == "POINT":
+        layer = bm.verts.layers.float.get(self.attribute_name)
+        if layer is not None:
+            marked_verts = {v for v in bm.verts if v[layer] == 1.0}
+    elif attribute.domain == "EDGE":
+        layer = bm.edges.layers.float.get(self.attribute_name)
+        if layer is not None:
+            for e in bm.edges:
+                if e[layer] == 1.0:
+                    marked_verts.update(e.verts)
+    elif attribute.domain == "FACE":
+        layer = bm.faces.layers.float.get(self.attribute_name)
+        if layer is not None:
+            for f in bm.faces:
+                if f[layer] == 1.0:
+                    marked_verts.update(f.verts)
+
+    # express them in the new domain, before the bmesh gets invalidated
+    if domain == "POINT":
+        values = [v in marked_verts for v in bm.verts]
+    elif domain == "EDGE":
+        values = [
+            e.verts[0] in marked_verts and e.verts[1] in marked_verts
+            for e in bm.edges
+        ]
+    else:  # FACE
+        values = [all(v in marked_verts for v in f.verts) for f in bm.faces]
+
+    # recreating the attribute needs object mode, like the other attribute helpers
+    bpy.ops.object.mode_set(mode="OBJECT")
+    mesh.attributes.remove(mesh.attributes.get(self.attribute_name))
+    attribute = mesh.attributes.new(name=self.attribute_name, type="FLOAT", domain=domain)
+    self.attribute_name = attribute.name
+    attribute.data.foreach_set("value", values)
+    bpy.ops.object.mode_set(mode="EDIT")
+
+
+def update_plane_fix_center(self, context):
+    """Capture the current loop center when the center gets fixed"""
+    _capture_plane_fix(self, context, capture_center=True, capture_normal=False)
+    push_constraint_undo("Change Constraint")
+
+
+def update_plane_fix_normal(self, context):
+    """Capture the current loop normal when the normal gets fixed"""
+    _capture_plane_fix(self, context, capture_center=False, capture_normal=True)
+    push_constraint_undo("Change Constraint")
+
+
+def _capture_plane_fix(self, context, capture_center, capture_normal):
+    """Refresh only the value whose fix flag was just toggled - the other one
+    may hold a manual edit that must survive."""
     if self.constraint_type != "PLANE":
         return
-    
-    # If neither fix flag is on, nothing to recalculate
-    if not (self.fix_center or self.fix_normal):
+    capture_center = capture_center and self.fix_center
+    capture_normal = capture_normal and self.fix_normal
+    if not (capture_center or capture_normal):
         return
-    
+
     # Get the constraint's vertices
     mesh = context.active_object.data
     bm = bmesh.from_edit_mesh(mesh)
-    
+
     # Get vertices from attribute
     if not self.attribute_name or self.attribute_name not in bm.edges.layers.float:
         print(f"Constraint {self.name} Attribute {self.attribute_name} not found")
         return
-        
+
     loops = utils.get_attribute_elements(context.active_object, bm, self, domain="EDGE", as_domain="POINT")
-    
-    joined_normal = None
-    
+
     # Calculate common center and normal from all loops
     joined_normal, joined_center = calculate_joined_normal(self, loops)
 
-    # Only update the values that are now fixed (since this callback is triggered on change)
-    if self.fix_center:
+    if capture_center:
         self.center = joined_center
-    if self.fix_normal:
+    if capture_normal:
         self.normal = joined_normal
 
 
 def update_line_fix_flags(self, context):
     """Capture the current ends of every open loop when the line gets fixed"""
+    _capture_line_fix(self, context)
+    push_constraint_undo("Change Constraint")
+
+
+def _capture_line_fix(self, context):
     if self.constraint_type != "LINE" or not self.fix_line:
         return
 
@@ -2394,6 +2826,11 @@ def update_line_fix_flags(self, context):
 
 def update_circle_fix_flags(self, context):
     """Capture the current best-fit circle of every loop when the circle gets fixed"""
+    _capture_circle_fix(self, context)
+    push_constraint_undo("Change Constraint")
+
+
+def _capture_circle_fix(self, context):
     if self.constraint_type != "CIRCLE" or not self.fix_circle:
         return
 
@@ -2504,6 +2941,14 @@ class CustomConstraint(bpy.types.PropertyGroup):
                 "MESH_CIRCLE",
                 9,
             ),
+            (
+                "THICKNESS",
+                "Thickness",
+                "Keep the wall thickness under the vertices within bounds,"
+                "\nmeasured by rays cast inwards against the mesh itself",
+                "MOD_SOLIDIFY",
+                10,
+            ),
             # (
             #     "ANGLE",
             #     "Angle",
@@ -2512,19 +2957,19 @@ class CustomConstraint(bpy.types.PropertyGroup):
             #     7,
             # ),
         ],
-        update=update_constraint_data,
+        update=update_constraint_type,
     )
     fix_center: bpy.props.BoolProperty(
         name="Fix Center",
         default=False,
         description="Fix the plane center position",
-        update=update_plane_fix_flags,
+        update=update_plane_fix_center,
     )
     fix_normal: bpy.props.BoolProperty(
         name="Fix Normal",
         default=False,
         description="Fix the plane normal/rotation",
-        update=update_plane_fix_flags,
+        update=update_plane_fix_normal,
     )
     join_center: bpy.props.BoolProperty(
         name="Join Center",
@@ -2714,7 +3159,7 @@ class CustomConstraint(bpy.types.PropertyGroup):
     )
     curvature_context_steps: bpy.props.IntProperty(
         name="Surroundings",
-        default=2,
+        default=0,
         min=0,
         soft_max=10,
         description="Also sample the curvature this many edges beyond the loop"
@@ -2732,6 +3177,48 @@ class CustomConstraint(bpy.types.PropertyGroup):
         update=update_line_fix_flags,
     )
     fixed_lines: bpy.props.CollectionProperty(type=FixedLineItem)
+
+    # Thickness constraint properties
+    thickness_use_min: bpy.props.BoolProperty(
+        name="Minimum",
+        default=True,
+        description="Push vertices apart where the wall is thinner than the minimum",
+        update=update_constraint_data,
+    )
+    thickness_min: bpy.props.FloatProperty(
+        name="Min Thickness",
+        default=0.005,
+        min=0.0,
+        soft_max=0.1,
+        unit="LENGTH",
+        description="Walls thinner than this get thickened",
+        update=update_constraint_data,
+    )
+    thickness_use_max: bpy.props.BoolProperty(
+        name="Maximum",
+        default=False,
+        description="Pull vertices together where the wall is thicker than the maximum",
+        update=update_constraint_data,
+    )
+    thickness_max: bpy.props.FloatProperty(
+        name="Max Thickness",
+        default=0.02,
+        min=0.0,
+        soft_max=0.5,
+        unit="LENGTH",
+        description="Walls thicker than this get thinned",
+        update=update_constraint_data,
+    )
+    thickness_ray_length: bpy.props.FloatProperty(
+        name="Threshold",
+        default=0.05,
+        min=0.0,
+        soft_max=1.0,
+        unit="LENGTH",
+        description="Length of the measuring ray - anything thicker than this"
+        "\ndoesn't count as a wall and the constraint leaves it alone",
+        update=update_constraint_data,
+    )
 
     # Circle constraint properties
     fix_circle: bpy.props.BoolProperty(
@@ -2815,6 +3302,10 @@ class VIEW3D_PT_final_topology_constraints(Panel):
         op = row.operator("object.final_topology_add_constraint", text="", icon="MESH_CIRCLE")
         op.constraint_type = "CIRCLE_FIXED"
         op.name = "Circle Fixed"
+
+        op = row.operator("object.final_topology_add_constraint", text="", icon="MOD_SOLIDIFY")
+        op.constraint_type = "THICKNESS"
+        op.name = "Thickness"
         layout.operator_context = "INVOKE_DEFAULT"
         row = layout.row()
         row.template_list(
@@ -2866,6 +3357,10 @@ class VIEW3D_PT_final_topology_constraints(Panel):
 
             if ac.constraint_type == "CURVE":
                 layout.prop(ac, "target_curve")
+                layout.operator(
+                    CurveFromSelectionOperator.bl_idname,
+                    icon="CURVE_BEZCURVE",
+                )
                 layout.prop(ac, "curve_snapping")
                 layout.prop(ac, "even_distribution")
             
@@ -2888,6 +3383,19 @@ class VIEW3D_PT_final_topology_constraints(Panel):
                         col = layout.column(align=True)
                         col.prop(item, "start")
                         col.prop(item, "end")
+
+            if ac.constraint_type == "THICKNESS":
+                row = layout.row(align=True)
+                row.prop(ac, "thickness_use_min", text="")
+                sub = row.row(align=True)
+                sub.enabled = ac.thickness_use_min
+                sub.prop(ac, "thickness_min")
+                row = layout.row(align=True)
+                row.prop(ac, "thickness_use_max", text="")
+                sub = row.row(align=True)
+                sub.enabled = ac.thickness_use_max
+                sub.prop(ac, "thickness_max")
+                layout.prop(ac, "thickness_ray_length")
 
             if ac.constraint_type == "CIRCLE":
                 row = layout.row()
@@ -3029,22 +3537,30 @@ class AddSelectionToConstraintOperator(bpy.types.Operator):
     remove: bpy.props.BoolProperty(name="Remove", default=False)
 
     def execute(self, context):
-        # Access the mesh data block
-        mesh = context.active_object.data
-        bm = bmesh.from_edit_mesh(mesh)
-        constraint = mesh.ft_custom_constraints[mesh.ft_custom_constraints_index]
-        attribute_name = constraint.attribute_name
-        domain = get_constraint_domain_type(constraint.constraint_type)
-        attribute_name = add_selection_to_attribute(
-            attribute_name, mesh, remove=self.remove, domain=domain
+        global _suppress_undo_push
+        _suppress_undo_push = True
+        try:
+            # Access the mesh data block
+            mesh = context.active_object.data
+            bm = bmesh.from_edit_mesh(mesh)
+            constraint = mesh.ft_custom_constraints[mesh.ft_custom_constraints_index]
+            attribute_name = constraint.attribute_name
+            domain = get_constraint_domain_type(constraint.constraint_type)
+            attribute_name = add_selection_to_attribute(
+                attribute_name, mesh, remove=self.remove, domain=domain
+            )
+            constraint.attribute_name = attribute_name
+        finally:
+            _suppress_undo_push = False
+        push_constraint_undo(
+            "Remove Selection from Constraint" if self.remove else "Add Selection to Constraint"
         )
-        constraint.attribute_name = attribute_name
         return {"FINISHED"}
 
 def get_constraint_domain_type(constraint_type):
     if constraint_type in ["PLANE", "CURVE", "SLIDE_OPTIMIZE", "SPACE", "CURVATURE", "LINE", "CIRCLE"]:
         return "EDGE"
-    elif constraint_type == "INVERSE_SUBDIVIDE":
+    elif constraint_type in ["INVERSE_SUBDIVIDE", "THICKNESS"]:
         return "POINT"
     elif constraint_type == "INCLINATION_LIMIT":
         return "FACE"
@@ -3132,6 +3648,13 @@ class AddConstraintOperator(bpy.types.Operator):
                 "MESH_CIRCLE",
                 11,
             ),
+            (
+                "THICKNESS",
+                "Thickness",
+                "Keep the wall thickness under the vertices within bounds",
+                "MOD_SOLIDIFY",
+                12,
+            ),
             # (
             #     "ANGLE",
             #     "Angle",
@@ -3184,6 +3707,18 @@ class AddConstraintOperator(bpy.types.Operator):
         return t
 
     def execute(self, context):
+        # one undo step for the whole add, not one per property it sets up
+        global _suppress_undo_push
+        _suppress_undo_push = True
+        try:
+            result = self.add_constraint(context)
+        finally:
+            _suppress_undo_push = False
+        if result == {"FINISHED"}:
+            push_constraint_undo("Add Constraint")
+        return result
+
+    def add_constraint(self, context):
         # Access the mesh data block
         mesh = context.active_object.data
 
@@ -3260,8 +3795,6 @@ class AddConstraintOperator(bpy.types.Operator):
         # Set name to the type of constraint, if the name is default
         if self.name == "Constraint":
             new_constraint.name = self.constraint_type.capitalize()
-        # push undo step
-        bpy.ops.ed.undo_push()
         return {"FINISHED"}
 
     def invoke(self, context, event):
@@ -3275,6 +3808,163 @@ class AddConstraintOperator(bpy.types.Operator):
         if self.constraint_type == "CURVE":
             layout.prop(self, "target_curve")
             layout.prop(self, "curve_snapping")
+
+
+def resample_polyline(points, count, cyclic):
+    """Evenly spaced positions along a polyline, count of them."""
+    tknots = [0.0]
+    for i in range(1, len(points)):
+        tknots.append(tknots[-1] + (points[i] - points[i - 1]).length)
+    total = tknots[-1]
+    if cyclic:
+        total += (points[0] - points[-1]).length
+    if total < 1e-9 or count < 2:
+        return list(points[:count])
+
+    segments = count if cyclic else count - 1
+    result = []
+    for i in range(count):
+        m = total * i / segments
+        segment = bisect_right(tknots, m) - 1
+        segment = max(0, min(segment, len(points) - 2 if not cyclic else len(points) - 1))
+        a = points[segment]
+        b = points[(segment + 1) % len(points)]
+        span_start = tknots[segment]
+        span = (b - a).length
+        t = 0.0 if span < 1e-12 else (m - span_start) / span
+        result.append(a.lerp(b, min(t, 1.0)))
+    return result
+
+
+class CurveFromSelectionOperator(bpy.types.Operator):
+    bl_idname = "object.final_topology_curve_from_selection"
+    bl_label = "Create Curve from Loop"
+    bl_description = (
+        "Create a bezier curve object from the constraint's loops and link it"
+        "\nas the target curve. With Works on Subdivision the curve follows the"
+        "\nsubdivided shape, otherwise the control loop"
+    )
+    bl_options = {"REGISTER", "UNDO"}
+
+    point_mode: bpy.props.EnumProperty(
+        name="Points",
+        default="ORIGINAL",
+        items=[
+            (
+                "ORIGINAL",
+                "Original",
+                "One control point per loop vertex",
+            ),
+            (
+                "COUNT",
+                "Best Fit",
+                "A smooth curve with a chosen number of control points,"
+                "\nspread evenly along the loop",
+            ),
+        ],
+    )
+    point_count: bpy.props.IntProperty(
+        name="Point Count",
+        default=6,
+        min=2,
+        soft_max=64,
+        description="Number of bezier control points in Best Fit mode",
+    )
+
+    @classmethod
+    def poll(cls, context):
+        ob = context.active_object
+        return (
+            ob is not None
+            and ob.type == "MESH"
+            and ob.mode == "EDIT"
+            and hasattr(ob.data, "ft_custom_constraints")
+            and len(ob.data.ft_custom_constraints) > 0
+        )
+
+    def execute(self, context):
+        global _suppress_undo_push
+        _suppress_undo_push = True
+        try:
+            result = self.create_curve(context)
+        finally:
+            _suppress_undo_push = False
+        if result == {"FINISHED"}:
+            push_constraint_undo("Create Constraint Curve")
+        return result
+
+    def create_curve(self, context):
+        ob = context.active_object
+        mesh = ob.data
+        constraint = mesh.ft_custom_constraints[mesh.ft_custom_constraints_index]
+
+        bm = bmesh.from_edit_mesh(mesh)
+        bm.verts.ensure_lookup_table()
+        domain = get_constraint_domain_type(constraint.constraint_type)
+        loops = utils.get_attribute_elements(
+            ob, bm, constraint, domain=domain, as_domain="POINT"
+        )
+        if not loops or not isinstance(loops[0], list) or len(loops[0]) != 2:
+            self.report({"ERROR"}, "The constraint has no loops to build a curve from")
+            return {"CANCELLED"}
+
+        # positions come from the control loop, or from the subdivided mesh
+        # when the constraint works on subdivision
+        eval_bm = None
+        if constraint.works_on_subdivision:
+            depsgraph = context.evaluated_depsgraph_get()
+            eval_bm = utils.get_evaluated_bm(ob, depsgraph)
+            eval_bm.verts.ensure_lookup_table()
+
+        curve_data = bpy.data.curves.new(f"{constraint.name}_curve", "CURVE")
+        curve_data.dimensions = "3D"
+        spline_count = 0
+        for loop_data in loops:
+            verts = loop_data[0]
+            is_circular = loop_data[1]
+            if len(verts) < 2:
+                continue
+            if eval_bm is not None:
+                points = [eval_bm.verts[v.index].co.copy() for v in verts]
+            else:
+                points = [v.co.copy() for v in verts]
+            if self.point_mode == "COUNT":
+                points = resample_polyline(points, self.point_count, is_circular)
+            if len(points) < 2:
+                continue
+
+            spline = curve_data.splines.new("BEZIER")
+            spline.bezier_points.add(len(points) - 1)
+            for bez, co in zip(spline.bezier_points, points):
+                bez.co = co
+                bez.handle_left_type = "AUTO"
+                bez.handle_right_type = "AUTO"
+            spline.use_cyclic_u = is_circular
+            spline_count += 1
+
+        if spline_count == 0:
+            bpy.data.curves.remove(curve_data)
+            self.report({"ERROR"}, "The constraint's loops are too short for a curve")
+            return {"CANCELLED"}
+
+        curve_ob = bpy.data.objects.new(curve_data.name, curve_data)
+        # same transform as the mesh, so the local point coordinates overlay
+        # the loop exactly
+        curve_ob.matrix_world = ob.matrix_world
+        context.collection.objects.link(curve_ob)
+
+        constraint.target_curve = curve_ob
+        return {"FINISHED"}
+
+    def invoke(self, context, event):
+        return context.window_manager.invoke_props_dialog(self)
+
+    def draw(self, context):
+        layout = self.layout
+        layout.prop(self, "point_mode")
+        row = layout.row()
+        row.enabled = self.point_mode == "COUNT"
+        row.prop(self, "point_count")
 
 
 class DeleteConstraintOperator(bpy.types.Operator):
@@ -3309,6 +3999,8 @@ class DeleteConstraintOperator(bpy.types.Operator):
             if mesh.ft_custom_constraints_index >= len(mesh.ft_custom_constraints):
                 mesh.ft_custom_constraints_index = len(mesh.ft_custom_constraints) - 1
 
+            push_constraint_undo("Delete Constraint")
+
         return {"FINISHED"}
 
 
@@ -3340,6 +4032,8 @@ class CUSTOM_UL_constraint_list(bpy.types.UIList):
             icon = "SPHERECURVE"
         elif constraint.constraint_type == "LINE":
             icon = "IPO_LINEAR"
+        elif constraint.constraint_type == "THICKNESS":
+            icon = "MOD_SOLIDIFY"
 
         layout.prop(constraint, "name", text="", emboss=False, icon=icon)
         
@@ -3495,6 +4189,67 @@ def get_active_curve_constraint(context):
     ):
         return ob, c
     return None, None
+
+
+class TargetCurveBezierPoints:
+    """Point handles adapter for the bezier control points of a target curve.
+
+    Grabbing a control point moves its two handles along rigidly, like
+    Blender's own grab of a bezier point, so the local shape rides with it.
+    """
+
+    def __init__(self, curve_object):
+        self.curve_object = curve_object
+        self._index_map = []
+        for spline_index, spline in enumerate(curve_object.data.splines):
+            if spline.type != "BEZIER":
+                continue
+            for point_index in range(len(spline.bezier_points)):
+                self._index_map.append((spline_index, point_index))
+
+    def _point(self, index):
+        spline_index, point_index = self._index_map[index]
+        return self.curve_object.data.splines[spline_index].bezier_points[point_index]
+
+    def count(self):
+        return len(self._index_map)
+
+    def location(self, index):
+        return self.curve_object.matrix_world @ self._point(index).co
+
+    def snapshot(self, index):
+        point = self._point(index)
+        return (
+            point.co.copy(),
+            point.handle_left.copy(),
+            point.handle_right.copy(),
+        )
+
+    def translate(self, index, snapshot, world_offset):
+        local_offset = self.curve_object.matrix_world.inverted().to_3x3() @ world_offset
+        point = self._point(index)
+        point.co = snapshot[0] + local_offset
+        point.handle_left = snapshot[1] + local_offset
+        point.handle_right = snapshot[2] + local_offset
+
+
+class CurvePointsGizmoGroup(gizmos.PointHandlesGizmoGroupBase, GizmoGroup):
+    bl_idname = "OBJECT_GGT_ft_curve_points"
+    bl_label = "Curve Constraint Control Points"
+    bl_space_type = "VIEW_3D"
+    bl_region_type = "WINDOW"
+    bl_options = {"3D", "PERSISTENT"}
+
+    @classmethod
+    def poll(cls, context):
+        ob, c = get_active_curve_constraint(context)
+        return c is not None
+
+    def get_point_target(self, context):
+        ob, c = get_active_curve_constraint(context)
+        if c is None:
+            return None
+        return TargetCurveBezierPoints(c.target_curve)
 
 
 class CurveConstraintGizmoGroup(gizmos.TransformGizmoGroupBase, GizmoGroup):
@@ -3888,12 +4643,14 @@ classes = [
     CustomConstraint,
     AddConstraintOperator,
     AddSelectionToConstraintOperator,
+    CurveFromSelectionOperator,
     DeleteConstraintOperator,
     CUSTOM_UL_constraint_list,
     VIEW3D_PT_final_topology_constraints,
     VIEW3D_PT_final_topology_extra_operators,
     CircleConstraintGizmoGroup,
     CurveConstraintGizmoGroup,
+    CurvePointsGizmoGroup,
     PlaneConstraintGizmoGroup,
     # TransformConstraintGizmo,
 ]

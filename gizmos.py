@@ -199,6 +199,83 @@ class TransformGizmoUnit:
         self.outline.matrix_basis = outline_matrix() @ Matrix.Scale(r, 4)
 
 
+class PointHandlesGizmoGroupBase:
+    """Mixin for a GizmoGroup with one grab handle per point of a target set.
+
+    The subclass provides get_point_target(context) returning an adapter with:
+
+        count()                     number of points
+        location(i)                 world position of point i
+        snapshot(i)                 opaque state of point i at drag start
+        translate(i, snapshot, o)   move point i by world offset o
+
+    Handles are pooled and never removed, surplus ones hide. The same drag
+    rules as the transform unit apply: one snapshot per drag, applied
+    absolutely, and the dragged handle's matrix is left alone mid-drag - the
+    move gizmo draws itself at its own current offset while dragging.
+    """
+
+    def setup(self, context):
+        self._point_gizmos = []
+        self._point_snapshots = {}
+        self._sync_points(context)
+
+    def _point_get(self, index):
+        def get():
+            target = self.get_point_target(bpy.context)
+            if target is not None and index not in self._point_snapshots:
+                self._point_snapshots[index] = target.snapshot(index)
+            return (0.0, 0.0, 0.0)
+
+        return get
+
+    def _point_set(self, index):
+        def set_value(value):
+            target = self.get_point_target(bpy.context)
+            snapshot = self._point_snapshots.get(index)
+            if target is not None and snapshot is not None:
+                target.translate(index, snapshot, Vector(value))
+
+        return set_value
+
+    def _sync_points(self, context):
+        target = self.get_point_target(context)
+        count = target.count() if target is not None else 0
+        while len(self._point_gizmos) < count:
+            index = len(self._point_gizmos)
+            gz = self.gizmos.new("GIZMO_GT_move_3d")
+            gz.draw_style = "RING_2D"
+            gz.draw_options = {"ALIGN_VIEW"}
+            gz.scale_basis = 0.12
+            gz.color = (1.0, 0.65, 0.2)
+            gz.alpha = 0.9
+            gz.color_highlight = (1.0, 1.0, 0.6)
+            gz.alpha_highlight = 1.0
+            gz.target_set_handler(
+                "offset", get=self._point_get(index), set=self._point_set(index)
+            )
+            self._point_gizmos.append(gz)
+
+        if not any(gz.is_modal for gz in self._point_gizmos):
+            # a finished drag's snapshots must not leak into the next one
+            self._point_snapshots.clear()
+
+        for i, gz in enumerate(self._point_gizmos):
+            if target is None or i >= count:
+                gz.hide = True
+                continue
+            if gz.is_modal:
+                continue
+            gz.hide = False
+            gz.matrix_basis = Matrix.Translation(target.location(i))
+
+    def refresh(self, context):
+        self._sync_points(context)
+
+    def draw_prepare(self, context):
+        self._sync_points(context)
+
+
 class TransformGizmoGroupBase:
     """Mixin for a GizmoGroup drawing transform units.
 

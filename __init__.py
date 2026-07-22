@@ -315,6 +315,17 @@ def final_topology_operators_draw(self, context):
             depress=False,
         )
 
+    # constraints replace the default inverse subdivision snapping - spell it
+    # out, since an empty viewport result otherwise looks like a broken tool
+    constraints = getattr(active_obj.data, "ft_custom_constraints", None)
+    if constraints is not None and len(constraints) > 0:
+        if not any(c.constraint_type == "INVERSE_SUBDIVIDE" for c in constraints):
+            col = layout.column(align=True)
+            col.scale_y = 0.8
+            col.label(text="With active constraints, you need to add", icon="INFO")
+            col.label(text="an inverse subdivision constraint", icon="BLANK1")
+            col.label(text="if you want to use it.", icon="BLANK1")
+
     layout = layout.column()
     # don't hide so it's actually possible to tweak the settings while off
 

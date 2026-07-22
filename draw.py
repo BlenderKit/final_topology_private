@@ -10,6 +10,12 @@ draw_lines = {}
 draw_faces = {}
 draw_points = {}
 draw_faces_list = []
+# triangles with one color per corner, for smooth deviation displays
+draw_colored_tris_pos = []
+draw_colored_tris_col = []
+# lines with one color per end, for smooth gradients along loops
+draw_colored_lines_pos = []
+draw_colored_lines_col = []
 
 RED = (1.0, 0.0, 0.0, 1.0)
 GREEN = (0.0, 1.0, 0.0, 1.0)
@@ -28,6 +34,37 @@ def clear_draw_list():
     draw_faces.clear()
     draw_points.clear()
     draw_faces_list.clear()
+    draw_colored_tris_pos.clear()
+    draw_colored_tris_col.clear()
+    draw_colored_lines_pos.clear()
+    draw_colored_lines_col.clear()
+
+
+def add_colored_line(coords, colors):
+    """Add one line with a color per end to the draw list.
+
+    coords: two world space positions, colors: two RGBA tuples. Consecutive
+    segments with per-vertex colors read as a smooth gradient along a loop.
+    """
+    global draw_colored_lines_pos, draw_colored_lines_col
+    for co in coords:
+        draw_colored_lines_pos.append(tuple(co))
+    for col in colors:
+        draw_colored_lines_col.append(tuple(col))
+
+
+def add_colored_tri(coords, colors):
+    """Add one triangle with a color per corner to the draw list.
+
+    coords: three world space positions, colors: three RGBA tuples. The colors
+    interpolate across the triangle, so per-vertex measurements read as a
+    smooth field over the faces.
+    """
+    global draw_colored_tris_pos, draw_colored_tris_col
+    for co in coords:
+        draw_colored_tris_pos.append(tuple(co))
+    for col in colors:
+        draw_colored_tris_col.append(tuple(col))
 
 
 def add_line(v1, v2, col):
@@ -214,6 +251,27 @@ def draw_callback_px_3d(self, context):
             )
             shader.uniform_float("color", col_with_alpha)
             batch.draw(shader)
+
+    if (draw_colored_tris_pos or draw_colored_lines_pos) and user_preferences.enable_draw_constraints:
+        if bpy.app.version < (4, 0, 0):
+            smooth_shader = gpu.shader.from_builtin("3D_SMOOTH_COLOR")
+        else:
+            smooth_shader = gpu.shader.from_builtin("SMOOTH_COLOR")
+        smooth_shader.bind()
+        if draw_colored_tris_pos:
+            batch = batch_for_shader(
+                smooth_shader,
+                "TRIS",
+                {"pos": draw_colored_tris_pos, "color": draw_colored_tris_col},
+            )
+            batch.draw(smooth_shader)
+        if draw_colored_lines_pos:
+            batch = batch_for_shader(
+                smooth_shader,
+                "LINES",
+                {"pos": draw_colored_lines_pos, "color": draw_colored_lines_col},
+            )
+            batch.draw(smooth_shader)
 
     for col, points in draw_points.items():
         for point in points:
