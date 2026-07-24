@@ -16,6 +16,8 @@ draw_colored_tris_col = []
 # lines with one color per end, for smooth gradients along loops
 draw_colored_lines_pos = []
 draw_colored_lines_col = []
+# little red squares marking pinned vertices, like UV editor pins
+draw_pins = []
 
 RED = (1.0, 0.0, 0.0, 1.0)
 GREEN = (0.0, 1.0, 0.0, 1.0)
@@ -38,6 +40,12 @@ def clear_draw_list():
     draw_colored_tris_col.clear()
     draw_colored_lines_pos.clear()
     draw_colored_lines_col.clear()
+    draw_pins.clear()
+
+
+def add_pin(co):
+    """Mark a pinned vertex - drawn as a little red square, like UV pins."""
+    draw_pins.append(tuple(co))
 
 
 def add_colored_line(coords, colors):
@@ -272,6 +280,14 @@ def draw_callback_px_3d(self, context):
                 {"pos": draw_colored_lines_pos, "color": draw_colored_lines_col},
             )
             batch.draw(smooth_shader)
+
+    if draw_pins and user_preferences.enable_draw_constraints:
+        gpu.state.point_size_set(7.0)
+        batch = batch_for_shader(shader, "POINTS", {"pos": draw_pins})
+        shader.uniform_float("color", (1.0, 0.12, 0.12, 0.95))
+        shader.bind()
+        batch.draw(shader)
+        gpu.state.point_size_set(1.0)
 
     for col, points in draw_points.items():
         for point in points:

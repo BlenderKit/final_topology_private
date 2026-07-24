@@ -33,6 +33,8 @@ handler, so the outline and the remaining handles follow the drag live.
 """
 
 import bpy
+from bpy.types import Gizmo
+from bpy_extras import view3d_utils
 from mathutils import Matrix, Vector
 
 AXIS_COLORS = (
@@ -199,6 +201,75 @@ class TransformGizmoUnit:
         self.outline.matrix_basis = outline_matrix() @ Matrix.Scale(r, 4)
 
 
+class FTPointHandleGizmo(Gizmo):
+    """A grab handle that stays exactly under the mouse.
+
+    The built-in move gizmo reports its drag offset in its own scaled space -
+    scale basis and the constant-screen-size factor both leak into the value,
+    so applying it as world units ran faster than the mouse and depended on
+    the zoom. This handle unprojects the mouse onto the view plane through the
+    grabbed point instead, so the point tracks the cursor one to one.
+    """
+
+    bl_idname = "VIEW3D_GT_ft_point_handle"
+
+    __slots__ = ("point_index", "_grab_start", "_point_start")
+
+    def _billboard_matrix(self, context):
+        """The gizmo's matrix turned to face the view, keeping its place and
+        screen size - an unrotated circle would lie flat in the scene."""
+        rv3d = context.region_data
+        rotation = rv3d.view_rotation.to_matrix() if rv3d else Matrix.Identity(3)
+        matrix = (rotation @ Matrix.Scale(self.matrix_world.median_scale, 3)).to_4x4()
+        matrix.translation = self.matrix_world.translation
+        return matrix
+
+    def draw(self, context):
+        self.draw_preset_circle(self._billboard_matrix(context))
+
+    def draw_select(self, context, select_id):
+        self.draw_preset_circle(self._billboard_matrix(context), select_id=select_id)
+
+    def _mouse_world(self, context, event):
+        anchor = self.matrix_basis.translation
+        return view3d_utils.region_2d_to_location_3d(
+            context.region,
+            context.region_data,
+            (event.mouse_region_x, event.mouse_region_y),
+            anchor,
+        )
+
+    def invoke(self, context, event):
+        self._grab_start = self._mouse_world(context, event)
+        self._point_start = self.matrix_basis.translation.copy()
+        self.group.on_point_grab(self.point_index)
+        return {"RUNNING_MODAL"}
+
+    def modal(self, context, event, tweak):
+        offset = None
+        if "SNAP" in tweak:
+            # snap onto the surface under the mouse
+            co2d = (event.mouse_region_x, event.mouse_region_y)
+            origin = view3d_utils.region_2d_to_origin_3d(context.region, context.region_data, co2d)
+            direction = view3d_utils.region_2d_to_vector_3d(context.region, context.region_data, co2d)
+            depsgraph = context.evaluated_depsgraph_get()
+            hit, location, _, _, _, _ = context.scene.ray_cast(depsgraph, origin, direction)
+            if hit:
+                offset = location - self._point_start
+        if offset is None:
+            offset = self._mouse_world(context, event) - self._grab_start
+            if "PRECISE" in tweak:
+                offset *= 0.1
+        self.group.on_point_drag(self.point_index, offset)
+        # follow the point, so the handle stays under the cursor visually too
+        self.matrix_basis = Matrix.Translation(self._point_start + offset)
+        return {"RUNNING_MODAL"}
+
+    def exit(self, context, cancel):
+        if cancel:
+            self.group.on_point_drag(self.point_index, Vector((0.0, 0.0, 0.0)))
+
+
 class PointHandlesGizmoGroupBase:
     """Mixin for a GizmoGroup with one grab handle per point of a target set.
 
@@ -209,10 +280,8 @@ class PointHandlesGizmoGroupBase:
         snapshot(i)                 opaque state of point i at drag start
         translate(i, snapshot, o)   move point i by world offset o
 
-    Handles are pooled and never removed, surplus ones hide. The same drag
-    rules as the transform unit apply: one snapshot per drag, applied
-    absolutely, and the dragged handle's matrix is left alone mid-drag - the
-    move gizmo draws itself at its own current offset while dragging.
+    Handles are pooled and never removed, surplus ones hide. One snapshot per
+    drag, offsets applied absolutely against it.
     """
 
     def setup(self, context):
@@ -220,40 +289,31 @@ class PointHandlesGizmoGroupBase:
         self._point_snapshots = {}
         self._sync_points(context)
 
-    def _point_get(self, index):
-        def get():
-            target = self.get_point_target(bpy.context)
-            if target is not None and index not in self._point_snapshots:
-                self._point_snapshots[index] = target.snapshot(index)
-            return (0.0, 0.0, 0.0)
+    def on_point_grab(self, index):
+        target = self.get_point_target(bpy.context)
+        if target is not None:
+            self._point_snapshots[index] = target.snapshot(index)
 
-        return get
-
-    def _point_set(self, index):
-        def set_value(value):
-            target = self.get_point_target(bpy.context)
-            snapshot = self._point_snapshots.get(index)
-            if target is not None and snapshot is not None:
-                target.translate(index, snapshot, Vector(value))
-
-        return set_value
+    def on_point_drag(self, index, world_offset):
+        target = self.get_point_target(bpy.context)
+        snapshot = self._point_snapshots.get(index)
+        if target is not None and snapshot is not None:
+            target.translate(index, snapshot, world_offset)
 
     def _sync_points(self, context):
         target = self.get_point_target(context)
         count = target.count() if target is not None else 0
         while len(self._point_gizmos) < count:
             index = len(self._point_gizmos)
-            gz = self.gizmos.new("GIZMO_GT_move_3d")
-            gz.draw_style = "RING_2D"
-            gz.draw_options = {"ALIGN_VIEW"}
+            gz = self.gizmos.new(FTPointHandleGizmo.bl_idname)
+            gz.point_index = index
             gz.scale_basis = 0.12
+            gz.line_width = 5.0
             gz.color = (1.0, 0.65, 0.2)
             gz.alpha = 0.9
             gz.color_highlight = (1.0, 1.0, 0.6)
             gz.alpha_highlight = 1.0
-            gz.target_set_handler(
-                "offset", get=self._point_get(index), set=self._point_set(index)
-            )
+            gz.use_draw_modal = True
             self._point_gizmos.append(gz)
 
         if not any(gz.is_modal for gz in self._point_gizmos):

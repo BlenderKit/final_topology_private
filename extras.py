@@ -198,7 +198,22 @@ def sample_curve_polyline(source_curve, curve_snapping, samples_per_segment=24):
     else:
         depsgraph = bpy.context.evaluated_depsgraph_get()
         bm_curve = utils.get_evaluated_bm(source_curve, depsgraph)
-        points = [matrix @ v.co for v in bm_curve.verts]
+        bm_curve.verts.ensure_lookup_table()
+        # only the first spline: the evaluated mesh holds every spline's
+        # tessellation concatenated, walk the chain its first vertex sits on
+        adjacency = {v.index: [] for v in bm_curve.verts}
+        for e in bm_curve.edges:
+            adjacency[e.verts[0].index].append(e.verts[1].index)
+            adjacency[e.verts[1].index].append(e.verts[0].index)
+        chain = [0]
+        visited = {0}
+        while True:
+            following = [n for n in adjacency.get(chain[-1], []) if n not in visited]
+            if not following:
+                break
+            chain.append(following[0])
+            visited.add(following[0])
+        points = [matrix @ bm_curve.verts[i].co for i in chain]
     points = [eval_point(p, curve_snapping, source_curve) for p in points]
     return points, cyclic
 
@@ -439,12 +454,19 @@ def edge_angle(e1, e2, face_normal):
 
 
 def circle_through_points(a, b, c):
-    """Circumcenter of the circle through three points, None when collinear."""
+    """Circumcenter of the circle through three points, None when collinear.
+
+    The collinearity test is relative to the segment lengths: nearly straight
+    triples put the circumcenter enormously far away, and rotating such a
+    radius vector in single precision produced garbage positions - a straight
+    stretch of a loop must fall back to its chord instead.
+    """
     u = b - a
     v = c - a
     n = u.cross(v)
     n_length_sq = n.length_squared
-    if n_length_sq < 1e-24:
+    # sin of the angle at a below 1e-4 counts as a straight line
+    if n_length_sq < u.length_squared * v.length_squared * 1e-8:
         return None
     return a + (
         v.length_squared * n.cross(u) + u.length_squared * v.cross(n)
@@ -456,7 +478,8 @@ def arc_point(a, b, center, t):
     ra = a - center
     rb = b - center
     axis = ra.cross(rb)
-    if axis.length_squared < 1e-24:
+    # relative test - a tiny angle on a huge radius is numerically a chord
+    if axis.length_squared < ra.length_squared * rb.length_squared * 1e-10:
         return a.lerp(b, t)
     angle = ra.angle(rb)
     return center + Matrix.Rotation(angle * t, 3, axis.normalized()) @ ra
@@ -2184,6 +2207,62 @@ def thickness_calculate(
     return target_offsets
 
 
+def smooth_verts_calculate(verts, factor=0.5):
+    """Smooth each vertex toward its neighbours without shrinking the shape.
+
+    Taubin lambda/mu smoothing: a positive smoothing pass followed by a
+    slightly stronger negative pass on the provisional positions. The pair
+    filters out the high frequency wiggle a plain neighbour average would,
+    but balances away the systematic inward pull that plain averaging has -
+    important here, because the constraint reapplies every modal iteration
+    and plain averaging would deflate the mesh forever.
+
+    Vertices on boundary, wire or non-manifold edges only average across
+    those feature edges - smoothing the border as a curve instead of letting
+    the one-sided face fan drag them inwards. Feature corners and border
+    endpoints, where the count of such edges isn't two, stay anchored.
+
+    Returns a dictionary mapping vertex indices to offset vectors.
+    """
+    lam = factor
+    mu = -1.06 * factor  # Taubin's classic 0.5/-0.53 ratio
+
+    neighbor_map = {}
+    for v in verts:
+        if not v.link_edges:
+            continue
+        feature_edges = [e for e in v.link_edges if len(e.link_faces) != 2]
+        if feature_edges:
+            if len(feature_edges) != 2:
+                continue
+            # sharp feature corners stay put too - smoothing would cut them
+            a = feature_edges[0].other_vert(v)
+            b = feature_edges[1].other_vert(v)
+            d1 = (v.co - a.co).normalized()
+            d2 = (b.co - v.co).normalized()
+            if d1.dot(d2) < 0.7071:  # bends more than 45 degrees
+                continue
+            edges = feature_edges
+        else:
+            edges = v.link_edges
+        neighbor_map[v] = [edge.other_vert(v) for edge in edges]
+
+    def averaged(positions, apply_factor):
+        result = {}
+        for v, neighbors in neighbor_map.items():
+            average = Vector((0.0, 0.0, 0.0))
+            for n in neighbors:
+                average += positions.get(n.index, n.co)
+            average /= len(neighbors)
+            current = positions.get(v.index, v.co)
+            result[v.index] = current + (average - current) * apply_factor
+        return result
+
+    first_pass = averaged({}, lam)
+    second_pass = averaged(first_pass, mu)
+    return {v.index: second_pass[v.index] - v.co for v in neighbor_map}
+
+
 def draw_loop_deviation(loops_data, target_offsets, matrix, alpha):
     """Gradient along the loops showing how far each vertex still is from
     satisfying the constraint - green settled, through yellow to red.
@@ -2224,6 +2303,20 @@ def evaluate_constraints(object, bmesh_edit=None, bmesh_eval=None, inverse_subdi
     target_offsets_all = []
     user_preferences = bpy.context.preferences.addons[__package__].preferences
 
+    # vertices held by pin constraints: they move only under the user's own
+    # transforms, no constraint nor inverse subdivision may touch them
+    pinned_verts = set()
+    for c in cs:
+        if c.constraint_type == "PIN" and c.enabled:
+            layer = bmesh_edit.verts.layers.float.get(c.attribute_name)
+            if layer is None:
+                continue
+            for v in bmesh_edit.verts:
+                if v[layer] == 1.0:
+                    pinned_verts.add(v.index)
+                    if user_preferences.enable_draw_constraints:
+                        draw.add_pin(object.matrix_world @ v.co)
+
     # remember which vertices sit on a mirror seam before anything moves
     mirror_data = []
     mirror_seam_sets = []
@@ -2231,10 +2324,15 @@ def evaluate_constraints(object, bmesh_edit=None, bmesh_eval=None, inverse_subdi
         mirror_data = utils.get_mirror_data(object)
         if mirror_data:
             mirror_seam_sets = utils.collect_mirror_seam_verts(bmesh_edit, mirror_data)
+            # pins outrank the seam snapping too
+            mirror_seam_sets = [seam - pinned_verts for seam in mirror_seam_sets]
 
     for i, c in enumerate(cs):
         # skip disabled constraints
         if not c.enabled:
+            continue
+        # pins don't compute anything, they only exempt their vertices
+        if c.constraint_type == "PIN":
             continue
 
         target_offsets = {}
@@ -2260,7 +2358,7 @@ def evaluate_constraints(object, bmesh_edit=None, bmesh_eval=None, inverse_subdi
         if len(constraint_elements_edit) == 0:
             continue
 
-        if c.constraint_type in ("INCLINATION_LIMIT", "INVERSE_SUBDIVIDE", "THICKNESS"):
+        if c.constraint_type in ("INCLINATION_LIMIT", "INVERSE_SUBDIVIDE", "THICKNESS", "SMOOTH"):
             # face and point domain constraints don't use the loop format -
             # wrapping their flat element lists as loops would crash the
             # subdivision mapping below
@@ -2401,6 +2499,14 @@ def evaluate_constraints(object, bmesh_edit=None, bmesh_eval=None, inverse_subdi
                 draw_alpha=0.4 * user_preferences.overlays_alpha,
             )
 
+        # evaluate smooth constraint
+        elif c.constraint_type == "SMOOTH":
+            measure_verts = constraint_elements_edit
+            if c.works_on_subdivision and bmesh_eval is not None:
+                bmesh_eval.verts.ensure_lookup_table()
+                measure_verts = [bmesh_eval.verts[v.index] for v in constraint_elements_edit]
+            target_offsets = smooth_verts_calculate(measure_verts, factor=c.smooth_factor)
+
         # evaluate inclination limit constraint
         elif c.constraint_type == "INCLINATION_LIMIT":
             target_offsets = inclination_limit_calculate(
@@ -2529,6 +2635,11 @@ def evaluate_constraints(object, bmesh_edit=None, bmesh_eval=None, inverse_subdi
                 step_weight=user_preferences.step_weight,
             )
 
+        # pinned vertices receive no offsets from anything
+        if pinned_verts:
+            for index in pinned_verts:
+                target_offsets.pop(index, None)
+
         # gradient along the active constraint's loops: how far each vertex
         # still is from satisfying it
         if (
@@ -2624,6 +2735,9 @@ class FunTopologyDecimateOperator(bpy.types.Operator):
 
 
 def update_constraint_index(self, context):
+    if _restoring_undo:
+        # don't touch the selection while undo puts the list back
+        return
     # select constraint vertices
     constraints = context.object.data.ft_custom_constraints
     index = context.object.data.ft_custom_constraints_index
@@ -2654,21 +2768,152 @@ def clear_constraints_cache():
 
 _suppress_undo_push = False
 
+# Undo for the constraint list. The list lives in ID properties, which edit
+# mode undo steps do not record - they only store the bmesh. What the bmesh
+# DOES carry through undo is its attribute layers. So every constraint action
+# stamps a version number into a hidden per-vertex attribute and files the
+# matching constraint state in this session dict. When the user undoes or
+# redoes, Blender rolls the attribute back or forward along with the mesh,
+# and the undo_post/redo_post handler reads the stamped version and restores
+# the filed constraint state for it. One Ctrl+Z, no mode hopping.
+_undo_states = {}  # (mesh name, version) -> serialized constraint state
+_restoring_undo = False
+UNDO_VERSION_LAYER = "ft_undo_version"
+
+
+def _serialize_props(property_group):
+    data = {}
+    for prop in property_group.bl_rna.properties:
+        identifier = prop.identifier
+        if identifier == "rna_type":
+            continue
+        if prop.type == "COLLECTION":
+            data[identifier] = [
+                _serialize_props(item) for item in getattr(property_group, identifier)
+            ]
+        elif prop.type == "POINTER":
+            value = getattr(property_group, identifier)
+            data[identifier] = None if value is None else value.name
+        elif prop.is_readonly:
+            continue
+        elif getattr(prop, "is_array", False):
+            data[identifier] = list(getattr(property_group, identifier))
+        else:
+            data[identifier] = getattr(property_group, identifier)
+    return data
+
+
+def _apply_props(property_group, data):
+    # the type enum first, the other properties describe that type
+    identifiers = sorted(data.keys(), key=lambda key: key != "constraint_type")
+    for identifier in identifiers:
+        value = data[identifier]
+        prop = property_group.bl_rna.properties.get(identifier)
+        if prop is None:
+            continue
+        if prop.type == "COLLECTION":
+            collection = getattr(property_group, identifier)
+            collection.clear()
+            for item_data in value:
+                _apply_props(collection.add(), item_data)
+        elif prop.type == "POINTER":
+            if value is None:
+                setattr(property_group, identifier, None)
+            else:
+                if prop.fixed_type.identifier == "Collection":
+                    container = bpy.data.collections
+                else:
+                    container = bpy.data.objects
+                setattr(property_group, identifier, container.get(value))
+        else:
+            try:
+                setattr(property_group, identifier, value)
+            except Exception:
+                pass
+
+
+def _serialize_constraint_state(mesh):
+    return {
+        "constraints": [_serialize_props(c) for c in mesh.ft_custom_constraints],
+        "index": mesh.ft_custom_constraints_index,
+    }
+
+
+def _apply_constraint_state(mesh, state):
+    mesh.ft_custom_constraints.clear()
+    for constraint_data in state["constraints"]:
+        _apply_props(mesh.ft_custom_constraints.add(), constraint_data)
+    mesh.ft_custom_constraints_index = min(
+        state["index"], len(mesh.ft_custom_constraints) - 1
+    )
+
+
+def _read_undo_version(mesh):
+    if mesh.is_editmode:
+        bm = bmesh.from_edit_mesh(mesh)
+        layer = bm.verts.layers.float.get(UNDO_VERSION_LAYER)
+        if layer is None or len(bm.verts) == 0:
+            return 0
+        return int(max(v[layer] for v in bm.verts))
+    attribute = mesh.attributes.get(UNDO_VERSION_LAYER)
+    if attribute is None or len(attribute.data) == 0:
+        return 0
+    values = [0.0] * len(attribute.data)
+    attribute.data.foreach_get("value", values)
+    return int(max(values))
+
+
+def _stamp_undo_version(mesh, version):
+    # written to every vertex - newly created vertices default to 0, so the
+    # maximum is what counts
+    if mesh.is_editmode:
+        bm = bmesh.from_edit_mesh(mesh)
+        layer = bm.verts.layers.float.get(UNDO_VERSION_LAYER)
+        if layer is None:
+            layer = bm.verts.layers.float.new(UNDO_VERSION_LAYER)
+        for v in bm.verts:
+            v[layer] = version
+        bmesh.update_edit_mesh(mesh, loop_triangles=False, destructive=False)
+    else:
+        attribute = mesh.attributes.get(UNDO_VERSION_LAYER)
+        if attribute is None:
+            attribute = mesh.attributes.new(
+                name=UNDO_VERSION_LAYER, type="FLOAT", domain="POINT"
+            )
+        attribute.data.foreach_set("value", [float(version)] * len(attribute.data))
+
+
+def record_constraint_undo_state(mesh):
+    """File the constraint state for the mesh's current stamped version, if
+    this session hasn't seen it yet - the pre-action baseline."""
+    key = (mesh.name, _read_undo_version(mesh))
+    if key not in _undo_states:
+        _undo_states[key] = _serialize_constraint_state(mesh)
+
 
 def push_constraint_undo(message):
-    """Record an undoable checkpoint for a constraint action.
+    """Stamp a new version and file the constraint state for it.
 
-    The constraint list lives in ID properties, which edit mode undo steps do
-    not record - only object mode (memfile) steps do. So the checkpoint hops
-    to object mode for a full snapshot and returns. Undoing a constraint
-    action then takes two undo steps: the first lands on the checkpoint in
-    object mode, the second restores the state before the action. Mesh edits
-    made in between survive, they live in the edit mode step chain.
-
-    Skipped while one of the constraint operators runs - the operator pushes a
-    single checkpoint for the whole action itself, and the property updates
-    fired along the way must not add more.
+    No undo step is pushed here - the UI pushes its own step right after the
+    operator or property edit that got us called, and that step carries the
+    freshly stamped attribute. Headless tests push their own steps.
     """
+    if _suppress_undo_push or _restoring_undo:
+        return
+    obj = bpy.context.active_object
+    if obj is None or obj.type != "MESH":
+        return
+    mesh = obj.data
+    version = _read_undo_version(mesh) + 1
+    _stamp_undo_version(mesh, version)
+    _undo_states[(mesh.name, version)] = _serialize_constraint_state(mesh)
+
+
+def checkpoint_memfile_undo(message):
+    """Full object mode checkpoint, taken BEFORE an action that creates or
+    deletes datablocks - those don't ride along with edit mode undo steps,
+    only a memfile snapshot from before the action can bring them back.
+    Reverting then takes two undo steps and hops through object mode."""
     if _suppress_undo_push:
         return
     try:
@@ -2683,6 +2928,51 @@ def push_constraint_undo(message):
         pass
 
 
+def _sync_constraints_after_undo(scene=None):
+    global _restoring_undo
+    if _restoring_undo:
+        return
+    context = bpy.context
+    objects = set(getattr(context, "objects_in_mode", None) or [])
+    if context.active_object is not None:
+        objects.add(context.active_object)
+    for obj in objects:
+        if obj.type != "MESH":
+            continue
+        mesh = obj.data
+        state = _undo_states.get((mesh.name, _read_undo_version(mesh)))
+        if state is None:
+            continue
+        if state == _serialize_constraint_state(mesh):
+            continue
+        _restoring_undo = True
+        try:
+            _apply_constraint_state(mesh, state)
+        finally:
+            _restoring_undo = False
+        clear_constraints_cache()
+
+
+@bpy.app.handlers.persistent
+def _constraint_undo_post(scene, _depsgraph=None):
+    _sync_constraints_after_undo(scene)
+
+
+@bpy.app.handlers.persistent
+def _constraint_redo_post(scene, _depsgraph=None):
+    _sync_constraints_after_undo(scene)
+
+
+@bpy.app.handlers.persistent
+def _constraint_load_post(scene, _depsgraph=None):
+    # baseline every mesh with constraints, so the first action in this
+    # session has a pre-state to undo back to
+    _undo_states.clear()
+    for mesh in bpy.data.meshes:
+        if len(mesh.ft_custom_constraints):
+            record_constraint_undo_state(mesh)
+
+
 def update_constraint_data(self, context):
     clear_constraints_cache()
     # constraint property edits happen in edit mode, where Blender's own
@@ -2695,6 +2985,9 @@ def update_constraint_type(self, context):
     convert the stored attribute along, so the assignment survives the switch
     instead of crashing the evaluation with a missing layer."""
     clear_constraints_cache()
+    if _restoring_undo:
+        # the undo-restored attribute already matches the restored type
+        return
     convert_constraint_attribute_domain(self, context)
     push_constraint_undo("Change Constraint Type")
 
@@ -2751,12 +3044,16 @@ def convert_constraint_attribute_domain(self, context):
 
 def update_plane_fix_center(self, context):
     """Capture the current loop center when the center gets fixed"""
+    if _restoring_undo:
+        return
     _capture_plane_fix(self, context, capture_center=True, capture_normal=False)
     push_constraint_undo("Change Constraint")
 
 
 def update_plane_fix_normal(self, context):
     """Capture the current loop normal when the normal gets fixed"""
+    if _restoring_undo:
+        return
     _capture_plane_fix(self, context, capture_center=False, capture_normal=True)
     push_constraint_undo("Change Constraint")
 
@@ -2793,6 +3090,8 @@ def _capture_plane_fix(self, context, capture_center, capture_normal):
 
 def update_line_fix_flags(self, context):
     """Capture the current ends of every open loop when the line gets fixed"""
+    if _restoring_undo:
+        return
     _capture_line_fix(self, context)
     push_constraint_undo("Change Constraint")
 
@@ -2826,6 +3125,8 @@ def _capture_line_fix(self, context):
 
 def update_circle_fix_flags(self, context):
     """Capture the current best-fit circle of every loop when the circle gets fixed"""
+    if _restoring_undo:
+        return
     _capture_circle_fix(self, context)
     push_constraint_undo("Change Constraint")
 
@@ -2949,6 +3250,22 @@ class CustomConstraint(bpy.types.PropertyGroup):
                 "MOD_SOLIDIFY",
                 10,
             ),
+            (
+                "PIN",
+                "Pin",
+                "Freeze the vertices against all constraints and inverse"
+                "\nsubdivision - only your own transforms move them",
+                "PINNED",
+                11,
+            ),
+            (
+                "SMOOTH",
+                "Smooth",
+                "Pull each vertex toward the average of its neighbours,"
+                "\nlike the smooth vertices operator, a bit every iteration",
+                "MOD_SMOOTH",
+                12,
+            ),
             # (
             #     "ANGLE",
             #     "Angle",
@@ -3051,7 +3368,7 @@ class CustomConstraint(bpy.types.PropertyGroup):
     )
     curve_snapping: bpy.props.EnumProperty(
         name="Curve Snapping",
-        default="PROJECT_PLANE",
+        default="3D",
         items=[
             ("3D", "3D", "Project to curve in 3D"),
             (
@@ -3177,6 +3494,17 @@ class CustomConstraint(bpy.types.PropertyGroup):
         update=update_line_fix_flags,
     )
     fixed_lines: bpy.props.CollectionProperty(type=FixedLineItem)
+
+    # Smooth constraint properties
+    smooth_factor: bpy.props.FloatProperty(
+        name="Factor",
+        default=0.5,
+        min=0.0,
+        soft_max=1.0,
+        description="How strongly each vertex is pulled toward the average"
+        "\nof its neighbours per iteration",
+        update=update_constraint_data,
+    )
 
     # Thickness constraint properties
     thickness_use_min: bpy.props.BoolProperty(
@@ -3306,6 +3634,14 @@ class VIEW3D_PT_final_topology_constraints(Panel):
         op = row.operator("object.final_topology_add_constraint", text="", icon="MOD_SOLIDIFY")
         op.constraint_type = "THICKNESS"
         op.name = "Thickness"
+
+        op = row.operator("object.final_topology_add_constraint", text="", icon="PINNED")
+        op.constraint_type = "PIN"
+        op.name = "Pin"
+
+        op = row.operator("object.final_topology_add_constraint", text="", icon="MOD_SMOOTH")
+        op.constraint_type = "SMOOTH"
+        op.name = "Smooth"
         layout.operator_context = "INVOKE_DEFAULT"
         row = layout.row()
         row.template_list(
@@ -3337,7 +3673,7 @@ class VIEW3D_PT_final_topology_constraints(Panel):
             ac = mesh.ft_custom_constraints[mesh.ft_custom_constraints_index]
             layout.prop(ac, "name")
             layout.prop(ac, "constraint_type")
-            if ac.constraint_type != "INVERSE_SUBDIVIDE":
+            if ac.constraint_type not in ("INVERSE_SUBDIVIDE", "PIN"):
                 layout.prop(ac, "works_on_subdivision")
 
             if ac.constraint_type == "PLANE":
@@ -3383,6 +3719,15 @@ class VIEW3D_PT_final_topology_constraints(Panel):
                         col = layout.column(align=True)
                         col.prop(item, "start")
                         col.prop(item, "end")
+
+            if ac.constraint_type == "PIN":
+                col = layout.column(align=True)
+                col.scale_y = 0.8
+                col.label(text="Pinned vertices only move under", icon="PINNED")
+                col.label(text="your own transforms.", icon="BLANK1")
+
+            if ac.constraint_type == "SMOOTH":
+                layout.prop(ac, "smooth_factor")
 
             if ac.constraint_type == "THICKNESS":
                 row = layout.row(align=True)
@@ -3538,6 +3883,7 @@ class AddSelectionToConstraintOperator(bpy.types.Operator):
 
     def execute(self, context):
         global _suppress_undo_push
+        record_constraint_undo_state(context.active_object.data)
         _suppress_undo_push = True
         try:
             # Access the mesh data block
@@ -3560,7 +3906,7 @@ class AddSelectionToConstraintOperator(bpy.types.Operator):
 def get_constraint_domain_type(constraint_type):
     if constraint_type in ["PLANE", "CURVE", "SLIDE_OPTIMIZE", "SPACE", "CURVATURE", "LINE", "CIRCLE"]:
         return "EDGE"
-    elif constraint_type in ["INVERSE_SUBDIVIDE", "THICKNESS"]:
+    elif constraint_type in ["INVERSE_SUBDIVIDE", "THICKNESS", "PIN", "SMOOTH"]:
         return "POINT"
     elif constraint_type == "INCLINATION_LIMIT":
         return "FACE"
@@ -3655,6 +4001,20 @@ class AddConstraintOperator(bpy.types.Operator):
                 "MOD_SOLIDIFY",
                 12,
             ),
+            (
+                "PIN",
+                "Pin",
+                "Freeze the vertices against all constraints and inverse subdivision",
+                "PINNED",
+                13,
+            ),
+            (
+                "SMOOTH",
+                "Smooth",
+                "Pull each vertex toward the average of its neighbours",
+                "MOD_SMOOTH",
+                14,
+            ),
             # (
             #     "ANGLE",
             #     "Angle",
@@ -3680,7 +4040,7 @@ class AddConstraintOperator(bpy.types.Operator):
     )
     curve_snapping: bpy.props.EnumProperty(
         name="Curve Snapping",
-        default="PROJECT_PLANE",
+        default="3D",
         items=[
             ("3D", "3D", "Project to curve in 3D"),
             (
@@ -3707,8 +4067,9 @@ class AddConstraintOperator(bpy.types.Operator):
         return t
 
     def execute(self, context):
-        # one undo step for the whole add, not one per property it sets up
+        # one undo version for the whole add, not one per property it sets up
         global _suppress_undo_push
+        record_constraint_undo_state(context.active_object.data)
         _suppress_undo_push = True
         try:
             result = self.add_constraint(context)
@@ -3846,6 +4207,19 @@ class CurveFromSelectionOperator(bpy.types.Operator):
     )
     bl_options = {"REGISTER", "UNDO"}
 
+    curve_type: bpy.props.EnumProperty(
+        name="Type",
+        default="NURBS",
+        items=[
+            (
+                "NURBS",
+                "Nurbs",
+                "A nurbs curve clamped to its end points - controllable"
+                "\nwithout handles",
+            ),
+            ("BEZIER", "Bezier", "A bezier curve with automatic handles"),
+        ],
+    )
     point_mode: bpy.props.EnumProperty(
         name="Points",
         default="ORIGINAL",
@@ -3868,7 +4242,7 @@ class CurveFromSelectionOperator(bpy.types.Operator):
         default=6,
         min=2,
         soft_max=64,
-        description="Number of bezier control points in Best Fit mode",
+        description="Number of control points in Best Fit mode",
     )
 
     @classmethod
@@ -3884,6 +4258,10 @@ class CurveFromSelectionOperator(bpy.types.Operator):
 
     def execute(self, context):
         global _suppress_undo_push
+        record_constraint_undo_state(context.active_object.data)
+        # checkpoint first - undoing must also remove the created curve
+        # object, which only a memfile snapshot from before it can do
+        checkpoint_memfile_undo("Create Constraint Curve")
         _suppress_undo_push = True
         try:
             result = self.create_curve(context)
@@ -3933,12 +4311,25 @@ class CurveFromSelectionOperator(bpy.types.Operator):
             if len(points) < 2:
                 continue
 
-            spline = curve_data.splines.new("BEZIER")
-            spline.bezier_points.add(len(points) - 1)
-            for bez, co in zip(spline.bezier_points, points):
-                bez.co = co
-                bez.handle_left_type = "AUTO"
-                bez.handle_right_type = "AUTO"
+            if self.curve_type == "BEZIER":
+                spline = curve_data.splines.new("BEZIER")
+                spline.bezier_points.add(len(points) - 1)
+                for bez, co in zip(spline.bezier_points, points):
+                    bez.co = co
+                    bez.handle_left_type = "AUTO"
+                    bez.handle_right_type = "AUTO"
+            else:
+                spline = curve_data.splines.new("NURBS")
+                spline.points.add(len(points) - 1)
+                for nurbs_point, co in zip(spline.points, points):
+                    nurbs_point.co = (co.x, co.y, co.z, 1.0)
+                # clamped to the end points, so the curve starts and ends
+                # exactly at the loop ends and is controllable without handles
+                spline.use_endpoint_u = True
+                spline.order_u = min(4, len(points))
+                # the constraint evaluates non-bezier curves through their
+                # tessellation, give it a finer one than the display default
+                spline.resolution_u = 24
             spline.use_cyclic_u = is_circular
             spline_count += 1
 
@@ -3961,6 +4352,7 @@ class CurveFromSelectionOperator(bpy.types.Operator):
 
     def draw(self, context):
         layout = self.layout
+        layout.prop(self, "curve_type")
         layout.prop(self, "point_mode")
         row = layout.row()
         row.enabled = self.point_mode == "COUNT"
@@ -3975,6 +4367,7 @@ class DeleteConstraintOperator(bpy.types.Operator):
     def execute(self, context):
         mesh = context.active_object.data
         active_obj = context.active_object
+        record_constraint_undo_state(mesh)
 
         if (
             mesh.ft_custom_constraints_index >= 0
@@ -4034,6 +4427,10 @@ class CUSTOM_UL_constraint_list(bpy.types.UIList):
             icon = "IPO_LINEAR"
         elif constraint.constraint_type == "THICKNESS":
             icon = "MOD_SOLIDIFY"
+        elif constraint.constraint_type == "PIN":
+            icon = "PINNED"
+        elif constraint.constraint_type == "SMOOTH":
+            icon = "MOD_SMOOTH"
 
         layout.prop(constraint, "name", text="", emboss=False, icon=icon)
         
@@ -4191,46 +4588,134 @@ def get_active_curve_constraint(context):
     return None, None
 
 
-class TargetCurveBezierPoints:
-    """Point handles adapter for the bezier control points of a target curve.
+def get_curve_constraint_curves(context):
+    """All target curves of the mesh's enabled curve constraints, deduplicated,
+    for when the active constraint being a curve one shows all their handles."""
+    ob, active = get_active_curve_constraint(context)
+    if active is None:
+        return None, []
+    curves = []
+    for c in ob.data.ft_custom_constraints:
+        if (
+            c.constraint_type == "CURVE"
+            and c.enabled
+            and c.target_curve is not None
+            and c.target_curve.type == "CURVE"
+            and c.target_curve not in curves
+        ):
+            curves.append(c.target_curve)
+    return ob, curves
 
-    Grabbing a control point moves its two handles along rigidly, like
-    Blender's own grab of a bezier point, so the local shape rides with it.
+
+class TargetCurveControlPoints:
+    """Point handles adapter for the control points of a target curve.
+
+    Covers bezier points - their two handles ride along rigidly, like
+    Blender's own grab of a bezier point - as well as nurbs and poly spline
+    points, which are bare positions.
     """
 
     def __init__(self, curve_object):
         self.curve_object = curve_object
         self._index_map = []
         for spline_index, spline in enumerate(curve_object.data.splines):
-            if spline.type != "BEZIER":
-                continue
-            for point_index in range(len(spline.bezier_points)):
-                self._index_map.append((spline_index, point_index))
+            if spline.type == "BEZIER":
+                for point_index in range(len(spline.bezier_points)):
+                    self._index_map.append((spline_index, point_index, True))
+            else:
+                for point_index in range(len(spline.points)):
+                    self._index_map.append((spline_index, point_index, False))
 
     def _point(self, index):
-        spline_index, point_index = self._index_map[index]
-        return self.curve_object.data.splines[spline_index].bezier_points[point_index]
+        spline_index, point_index, is_bezier = self._index_map[index]
+        spline = self.curve_object.data.splines[spline_index]
+        if is_bezier:
+            return spline.bezier_points[point_index], True
+        return spline.points[point_index], False
 
     def count(self):
         return len(self._index_map)
 
     def location(self, index):
-        return self.curve_object.matrix_world @ self._point(index).co
+        point, is_bezier = self._point(index)
+        co = point.co if is_bezier else point.co.to_3d()
+        return self.curve_object.matrix_world @ co
 
     def snapshot(self, index):
-        point = self._point(index)
-        return (
-            point.co.copy(),
-            point.handle_left.copy(),
-            point.handle_right.copy(),
-        )
+        point, is_bezier = self._point(index)
+        if is_bezier:
+            return (point.co.copy(), point.handle_left.copy(), point.handle_right.copy())
+        return (point.co.copy(),)
 
     def translate(self, index, snapshot, world_offset):
         local_offset = self.curve_object.matrix_world.inverted().to_3x3() @ world_offset
-        point = self._point(index)
-        point.co = snapshot[0] + local_offset
-        point.handle_left = snapshot[1] + local_offset
-        point.handle_right = snapshot[2] + local_offset
+        point, is_bezier = self._point(index)
+        if is_bezier:
+            point.co = snapshot[0] + local_offset
+            point.handle_left = snapshot[1] + local_offset
+            point.handle_right = snapshot[2] + local_offset
+        else:
+            # nurbs and poly points are 4d, keep the weight
+            point.co = (
+                snapshot[0].x + local_offset.x,
+                snapshot[0].y + local_offset.y,
+                snapshot[0].z + local_offset.z,
+                snapshot[0].w,
+            )
+
+
+class TargetCurveControlPointsMulti:
+    """Point handles over the control points of several curves at once.
+
+    Control points sitting (nearly) on the same world position share a single
+    handle and move together - also across different curves. That keeps the
+    touching ends of two curves joined while dragging, instead of tearing
+    them apart.
+    """
+
+    def __init__(self, curve_objects):
+        self.adapters = [TargetCurveControlPoints(ob) for ob in curve_objects]
+        points = []
+        for adapter_index, adapter in enumerate(self.adapters):
+            for point_index in range(adapter.count()):
+                points.append(
+                    (adapter_index, point_index, adapter.location(point_index))
+                )
+        # near-coincident points cluster - tolerance follows the overall spread
+        tolerance = 1e-6
+        if points:
+            for axis in range(3):
+                values = [co[axis] for _, _, co in points]
+                tolerance = max(tolerance, (max(values) - min(values)) * 1e-3)
+        self.clusters = []
+        for adapter_index, point_index, co in points:
+            for cluster in self.clusters:
+                if (cluster[0] - co).length <= tolerance:
+                    cluster[1].append((adapter_index, point_index))
+                    break
+            else:
+                self.clusters.append((co.copy(), [(adapter_index, point_index)]))
+
+    def count(self):
+        return len(self.clusters)
+
+    def location(self, index):
+        return self.clusters[index][0].copy()
+
+    def snapshot(self, index):
+        # the members ride in the snapshot - the drag stays glued to them
+        # even if moving them reshuffles the clustering
+        return [
+            (adapter_index, point_index, self.adapters[adapter_index].snapshot(point_index))
+            for adapter_index, point_index in self.clusters[index][1]
+        ]
+
+    def translate(self, index, snapshot, world_offset):
+        for adapter_index, point_index, point_snapshot in snapshot:
+            if adapter_index < len(self.adapters):
+                adapter = self.adapters[adapter_index]
+                if point_index < adapter.count():
+                    adapter.translate(point_index, point_snapshot, world_offset)
 
 
 class CurvePointsGizmoGroup(gizmos.PointHandlesGizmoGroupBase, GizmoGroup):
@@ -4246,10 +4731,10 @@ class CurvePointsGizmoGroup(gizmos.PointHandlesGizmoGroupBase, GizmoGroup):
         return c is not None
 
     def get_point_target(self, context):
-        ob, c = get_active_curve_constraint(context)
-        if c is None:
+        ob, curves = get_curve_constraint_curves(context)
+        if not curves:
             return None
-        return TargetCurveBezierPoints(c.target_curve)
+        return TargetCurveControlPointsMulti(curves)
 
 
 class CurveConstraintGizmoGroup(gizmos.TransformGizmoGroupBase, GizmoGroup):
@@ -4648,6 +5133,7 @@ classes = [
     CUSTOM_UL_constraint_list,
     VIEW3D_PT_final_topology_constraints,
     VIEW3D_PT_final_topology_extra_operators,
+    gizmos.FTPointHandleGizmo,
     CircleConstraintGizmoGroup,
     CurveConstraintGizmoGroup,
     CurvePointsGizmoGroup,
@@ -4665,9 +5151,29 @@ def register():
     bpy.types.Mesh.ft_custom_constraints_index = bpy.props.IntProperty(
         "Actve FT Constraint", default=0, update=update_constraint_index
     )
+    bpy.app.handlers.undo_post.append(_constraint_undo_post)
+    bpy.app.handlers.redo_post.append(_constraint_redo_post)
+    bpy.app.handlers.load_post.append(_constraint_load_post)
+    # baseline for the file already open when the addon comes up - bpy.data
+    # is restricted while Blender enables addons at startup, and there the
+    # load_post handler does this job anyway
+    try:
+        meshes = bpy.data.meshes
+    except AttributeError:
+        meshes = []
+    for mesh in meshes:
+        if len(mesh.ft_custom_constraints):
+            record_constraint_undo_state(mesh)
 
 
 def unregister():
+    for handler_list, handler in (
+        (bpy.app.handlers.undo_post, _constraint_undo_post),
+        (bpy.app.handlers.redo_post, _constraint_redo_post),
+        (bpy.app.handlers.load_post, _constraint_load_post),
+    ):
+        if handler in handler_list:
+            handler_list.remove(handler)
     for cls in classes:
         bpy.utils.unregister_class(cls)
     del bpy.types.Mesh.ft_custom_constraints
