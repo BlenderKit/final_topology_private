@@ -1909,6 +1909,8 @@ def circle_verts_calculate(
     fixed_circles=None,
     projected=False,
     mirror_planes=None,
+    join_center=False,
+    join_normal=False,
     draw_matrix=None,
     draw_color=None,
 ):
@@ -1924,6 +1926,12 @@ def circle_verts_calculate(
     circle in the projected view while keeping its relief along the normal, e.g.
     a circle projected on a curved surface.
 
+    With join_normal the loops share one averaged normal, with join_center they
+    share one axis: each loop keeps its own position along its normal, so
+    coplanar loops become concentric and stacked loops coaxial, without being
+    flattened onto one plane. Each loop keeps its own radius, refitted around
+    the shared values.
+
     Args:
         loops_data: List of loops, each as [verts_list, is_circular]
         distribution: 'ORIGINAL' keeps each vertex at its own angle around the
@@ -1934,6 +1942,8 @@ def circle_verts_calculate(
     """
     target_offsets = {}
 
+    # first fit every loop its own circle
+    fitted_loops = []
     for loop_data in loops_data:
         verts = loop_data[0]
         is_circular = loop_data[1]
@@ -1967,6 +1977,43 @@ def circle_verts_calculate(
                 continue
             c, n, r = fit
 
+        fitted_loops.append([verts, is_circular, c, n, r])
+
+    # stored circles already share whatever the user fixed - joining applies
+    # to the live fits
+    if (join_center or join_normal) and not fixed_circles and len(fitted_loops) > 1:
+        if join_normal:
+            reference = fitted_loops[0][3]
+            joined_normal = Vector((0.0, 0.0, 0.0))
+            for _, _, _, n, _ in fitted_loops:
+                joined_normal += -n if n.dot(reference) < 0 else n
+            if joined_normal.length_squared > 1e-12:
+                joined_normal.normalize()
+                for fitted in fitted_loops:
+                    fitted[3] = joined_normal.copy()
+        if join_center:
+            joined_center = Vector((0.0, 0.0, 0.0))
+            for _, _, c, _, _ in fitted_loops:
+                joined_center += c
+            joined_center /= len(fitted_loops)
+            for fitted in fitted_loops:
+                c, n = fitted[2], fitted[3]
+                # share the axis but keep the loop's own height along it, so
+                # stacked loops turn coaxial instead of collapsing together
+                fitted[2] = joined_center + n * (c - joined_center).dot(n)
+        # the shared center or normal moved the circle's plane - refit each
+        # loop's radius around it
+        for fitted in fitted_loops:
+            verts, _, c, n, _ = fitted
+            radius = 0.0
+            for vert in verts:
+                d = vert.co - c
+                radius += (d - n * d.dot(n)).length
+            fitted[4] = radius / len(verts)
+
+    for verts, is_circular, c, n, r in fitted_loops:
+        if r <= 1e-12:
+            continue
         u = n.orthogonal().normalized()
         w = n.cross(u)
 
@@ -2568,6 +2615,8 @@ def evaluate_constraints(object, bmesh_edit=None, bmesh_eval=None, inverse_subdi
                 fixed_circles=fixed_circles,
                 projected=c.projected,
                 mirror_planes=mirror_data,
+                join_center=c.join_center,
+                join_normal=c.join_normal,
                 draw_matrix=draw_matrix,
                 draw_color=draw_color,
             )
@@ -3291,12 +3340,16 @@ class CustomConstraint(bpy.types.PropertyGroup):
     join_center: bpy.props.BoolProperty(
         name="Join Center",
         default=False,
-        description="Calculate common center for all loops (only when center is not fixed)",
+        description="Calculate common center for all loops (only when center is not fixed)."
+        "\nOn circles the loops share one axis - coplanar loops become concentric,"
+        "\nstacked loops coaxial",
+        update=update_constraint_data,
     )
     join_normal: bpy.props.BoolProperty(
         name="Join Normal",
         default=False,
         description="Calculate common normal for all loops (only when normal is not fixed)",
+        update=update_constraint_data,
     )
     enabled: bpy.props.BoolProperty(name="Enabled", default=True)
     works_on_subdivision: bpy.props.BoolProperty(
@@ -3746,6 +3799,11 @@ class VIEW3D_PT_final_topology_constraints(Panel):
                 row = layout.row()
                 row.prop(ac, "even_distribution")
                 row.prop(ac, "projected")
+                if not ac.fix_circle:
+                    # e.g. concentric circles: shared axis and/or orientation
+                    row = layout.row()
+                    row.prop(ac, "join_center")
+                    row.prop(ac, "join_normal")
                 layout.prop(ac, "fix_circle")
                 if ac.fix_circle:
                     for item in ac.fixed_circles:

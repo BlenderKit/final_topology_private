@@ -32,6 +32,8 @@ touched; all the other gizmos of the unit are re-synced from inside the set
 handler, so the outline and the remaining handles follow the drag live.
 """
 
+from math import cos, pi, sin
+
 import bpy
 from bpy.types import Gizmo
 from bpy_extras import view3d_utils
@@ -201,6 +203,37 @@ class TransformGizmoUnit:
         self.outline.matrix_basis = outline_matrix() @ Matrix.Scale(r, 4)
 
 
+def _ring_tris(outer=1.0, inner=0.72, segments=32):
+    """A flat annulus as a triangle list - drawn filled, it reads as a circle
+    with a genuinely thick outline. GPU line width is capped at one pixel on
+    Metal, so a wide line circle can't be drawn as lines at all."""
+    verts = []
+    for i in range(segments):
+        a0 = 2.0 * pi * i / segments
+        a1 = 2.0 * pi * (i + 1) / segments
+        o0 = (cos(a0) * outer, sin(a0) * outer, 0.0)
+        o1 = (cos(a1) * outer, sin(a1) * outer, 0.0)
+        i0 = (cos(a0) * inner, sin(a0) * inner, 0.0)
+        i1 = (cos(a1) * inner, sin(a1) * inner, 0.0)
+        verts += [o0, i0, o1, i0, i1, o1]
+    return verts
+
+
+def _disc_tris(radius=1.0, segments=32):
+    """A filled disc - the invisible select shape, so grabbing the handle
+    works anywhere inside the ring, not only on the rim."""
+    verts = []
+    for i in range(segments):
+        a0 = 2.0 * pi * i / segments
+        a1 = 2.0 * pi * (i + 1) / segments
+        verts += [
+            (0.0, 0.0, 0.0),
+            (cos(a0) * radius, sin(a0) * radius, 0.0),
+            (cos(a1) * radius, sin(a1) * radius, 0.0),
+        ]
+    return verts
+
+
 class FTPointHandleGizmo(Gizmo):
     """A grab handle that stays exactly under the mouse.
 
@@ -213,7 +246,17 @@ class FTPointHandleGizmo(Gizmo):
 
     bl_idname = "VIEW3D_GT_ft_point_handle"
 
-    __slots__ = ("point_index", "_grab_start", "_point_start")
+    __slots__ = (
+        "point_index",
+        "_grab_start",
+        "_point_start",
+        "_ring_shape",
+        "_select_shape",
+    )
+
+    def setup(self):
+        self._ring_shape = self.new_custom_shape("TRIS", _ring_tris())
+        self._select_shape = self.new_custom_shape("TRIS", _disc_tris())
 
     def _billboard_matrix(self, context):
         """The gizmo's matrix turned to face the view, keeping its place and
@@ -225,10 +268,14 @@ class FTPointHandleGizmo(Gizmo):
         return matrix
 
     def draw(self, context):
-        self.draw_preset_circle(self._billboard_matrix(context))
+        self.draw_custom_shape(self._ring_shape, matrix=self._billboard_matrix(context))
 
     def draw_select(self, context, select_id):
-        self.draw_preset_circle(self._billboard_matrix(context), select_id=select_id)
+        self.draw_custom_shape(
+            self._select_shape,
+            matrix=self._billboard_matrix(context),
+            select_id=select_id,
+        )
 
     def _mouse_world(self, context, event):
         anchor = self.matrix_basis.translation
@@ -308,7 +355,6 @@ class PointHandlesGizmoGroupBase:
             gz = self.gizmos.new(FTPointHandleGizmo.bl_idname)
             gz.point_index = index
             gz.scale_basis = 0.12
-            gz.line_width = 5.0
             gz.color = (1.0, 0.65, 0.2)
             gz.alpha = 0.9
             gz.color_highlight = (1.0, 1.0, 0.6)
