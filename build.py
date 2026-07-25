@@ -10,6 +10,7 @@ IGNORE_PATTERNS = [
     ".gitignore",
     "*.md",
     ".DS_Store",
+    "tests", # test suites are for development only
 ]
 
 def pro_changes(workdir: str):
