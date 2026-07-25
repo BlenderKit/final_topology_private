@@ -4776,6 +4776,108 @@ class TargetCurveControlPointsMulti:
                     adapter.translate(point_index, point_snapshot, world_offset)
 
 
+# members of the cluster whose handle was clicked, handed from the gizmo
+# group to the tweak operator: (curve name, spline index, point index, bezier)
+_pending_curve_tweak = []
+
+
+def enter_curve_tweak(context, members):
+    """Hop from mesh edit mode into curve edit mode with exactly the given
+    control points selected. Returns the mesh object to come back to, or
+    None when the hop failed."""
+    mesh_object = context.active_object
+    curve_objects = []
+    for name in {m[0] for m in members}:
+        ob = bpy.data.objects.get(name)
+        if ob is not None and ob.type == "CURVE":
+            curve_objects.append(ob)
+    if not curve_objects or mesh_object is None:
+        return None
+
+    bpy.ops.object.mode_set(mode="OBJECT")
+    bpy.ops.object.select_all(action="DESELECT")
+    for ob in curve_objects:
+        ob.select_set(True)
+    context.view_layer.objects.active = curve_objects[0]
+    # multi-object edit: all selected curves enter together
+    bpy.ops.object.mode_set(mode="EDIT")
+    bpy.ops.curve.select_all(action="DESELECT")
+    for name, spline_index, point_index, is_bezier in members:
+        ob = bpy.data.objects.get(name)
+        if ob is None or spline_index >= len(ob.data.splines):
+            continue
+        spline = ob.data.splines[spline_index]
+        if is_bezier:
+            if point_index < len(spline.bezier_points):
+                point = spline.bezier_points[point_index]
+                point.select_control_point = True
+                point.select_left_handle = True
+                point.select_right_handle = True
+        else:
+            if point_index < len(spline.points):
+                spline.points[point_index].select = True
+    return mesh_object
+
+
+def return_to_mesh(context, mesh_object):
+    """Back from the curve tweak into the mesh's edit mode."""
+    if mesh_object is None:
+        return
+    try:
+        bpy.ops.object.mode_set(mode="OBJECT")
+        bpy.ops.object.select_all(action="DESELECT")
+        mesh_object.select_set(True)
+        context.view_layer.objects.active = mesh_object
+        bpy.ops.object.mode_set(mode="EDIT")
+    except Exception:
+        pass
+
+
+class CurvePointTweakOperator(bpy.types.Operator):
+    """Move the grabbed control points with Blender's own translate.
+
+    Clicking a point handle hops into the curves' edit mode, selects the
+    grabbed points and starts a tweak-style translate - so the full native
+    transform applies: snapping to vertices and edges, axis locking,
+    numeric input. When the drag ends, the mode hops back to the mesh.
+    """
+
+    bl_idname = "object.final_topology_curve_point_tweak"
+    bl_label = "Tweak Curve Control Point"
+    bl_options = {"REGISTER", "INTERNAL"}
+
+    def invoke(self, context, event):
+        members = list(_pending_curve_tweak)
+        if not members:
+            return {"CANCELLED"}
+        self._mesh_object = enter_curve_tweak(context, members)
+        if self._mesh_object is None:
+            return {"CANCELLED"}
+        bpy.ops.transform.translate("INVOKE_DEFAULT", release_confirm=True)
+        self._timer = context.window_manager.event_timer_add(
+            0.05, window=context.window
+        )
+        context.window_manager.modal_handler_add(self)
+        return {"RUNNING_MODAL"}
+
+    def _translate_running(self, context):
+        window = context.window
+        if window is None or not hasattr(window, "modal_operators"):
+            return False
+        return any(
+            op.bl_idname == "TRANSFORM_OT_translate" for op in window.modal_operators
+        )
+
+    def modal(self, context, event):
+        # the transform modal runs below this watcher - wait it out, then
+        # bring the user back to the mesh
+        if self._translate_running(context):
+            return {"PASS_THROUGH"}
+        context.window_manager.event_timer_remove(self._timer)
+        return_to_mesh(context, self._mesh_object)
+        return {"FINISHED"}
+
+
 class CurvePointsGizmoGroup(gizmos.PointHandlesGizmoGroupBase, GizmoGroup):
     bl_idname = "OBJECT_GGT_ft_curve_points"
     bl_label = "Curve Constraint Control Points"
@@ -4793,6 +4895,23 @@ class CurvePointsGizmoGroup(gizmos.PointHandlesGizmoGroupBase, GizmoGroup):
         if not curves:
             return None
         return TargetCurveControlPointsMulti(curves)
+
+    def on_point_tweak(self, index):
+        """Hand the clicked cluster to the native-transform tweak."""
+        target = self.get_point_target(bpy.context)
+        if target is None or index >= target.count():
+            return False
+        members = []
+        for adapter_index, point_index in target.clusters[index][1]:
+            adapter = target.adapters[adapter_index]
+            spline_index, spline_point, is_bezier = adapter._index_map[point_index]
+            members.append(
+                (adapter.curve_object.name, spline_index, spline_point, is_bezier)
+            )
+        global _pending_curve_tweak
+        _pending_curve_tweak = members
+        bpy.ops.object.final_topology_curve_point_tweak("INVOKE_DEFAULT")
+        return True
 
 
 class CurveConstraintGizmoGroup(gizmos.TransformGizmoGroupBase, GizmoGroup):
@@ -5194,6 +5313,7 @@ classes = [
     gizmos.FTPointHandleGizmo,
     CircleConstraintGizmoGroup,
     CurveConstraintGizmoGroup,
+    CurvePointTweakOperator,
     CurvePointsGizmoGroup,
     PlaneConstraintGizmoGroup,
     # TransformConstraintGizmo,

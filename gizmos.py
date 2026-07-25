@@ -287,26 +287,19 @@ class FTPointHandleGizmo(Gizmo):
         )
 
     def invoke(self, context, event):
+        # a group can take over the whole interaction, e.g. handing the drag
+        # to Blender's native transform for real snapping
+        if self.group.on_point_tweak(self.point_index):
+            return {"FINISHED"}
         self._grab_start = self._mouse_world(context, event)
         self._point_start = self.matrix_basis.translation.copy()
         self.group.on_point_grab(self.point_index)
         return {"RUNNING_MODAL"}
 
     def modal(self, context, event, tweak):
-        offset = None
-        if "SNAP" in tweak:
-            # snap onto the surface under the mouse
-            co2d = (event.mouse_region_x, event.mouse_region_y)
-            origin = view3d_utils.region_2d_to_origin_3d(context.region, context.region_data, co2d)
-            direction = view3d_utils.region_2d_to_vector_3d(context.region, context.region_data, co2d)
-            depsgraph = context.evaluated_depsgraph_get()
-            hit, location, _, _, _, _ = context.scene.ray_cast(depsgraph, origin, direction)
-            if hit:
-                offset = location - self._point_start
-        if offset is None:
-            offset = self._mouse_world(context, event) - self._grab_start
-            if "PRECISE" in tweak:
-                offset *= 0.1
+        offset = self._mouse_world(context, event) - self._grab_start
+        if "PRECISE" in tweak:
+            offset *= 0.1
         self.group.on_point_drag(self.point_index, offset)
         # follow the point, so the handle stays under the cursor visually too
         self.matrix_basis = Matrix.Translation(self._point_start + offset)
@@ -335,6 +328,11 @@ class PointHandlesGizmoGroupBase:
         self._point_gizmos = []
         self._point_snapshots = {}
         self._sync_points(context)
+
+    def on_point_tweak(self, index):
+        """Override to take over the click entirely (return True). The
+        default keeps the built-in mouse-tracking drag."""
+        return False
 
     def on_point_grab(self, index):
         target = self.get_point_target(bpy.context)

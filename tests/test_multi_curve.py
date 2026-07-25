@@ -102,7 +102,29 @@ obj.data.ft_custom_constraints[0].enabled = True
 ob2, curves2 = mod.extras.get_curve_constraint_curves(bpy.context)
 note(len(curves2) == 3, "re-enabled")
 
-print("\n=== 5. constraint evaluation still runs with all three ===")
+print("\n=== 5. tweak handoff: curve edit mode with the cluster selected ===")
+members = []
+for adapter_index, point_index in multi.clusters[shared][1]:
+    adapter = multi.adapters[adapter_index]
+    spline_index, spline_point, is_bezier = adapter._index_map[point_index]
+    members.append((adapter.curve_object.name, spline_index, spline_point, is_bezier))
+mesh_object = mod.extras.enter_curve_tweak(bpy.context, members)
+note(mesh_object is obj, "remembers the mesh to come back to")
+note(bpy.context.mode == "EDIT_CURVE", f"hopped into curve edit mode ({bpy.context.mode})")
+in_edit = {o.name for o in bpy.context.objects_in_mode}
+note(in_edit == {"A", "B", "C"}, f"all member curves entered together ({sorted(in_edit)})")
+selected, others = 0, 0
+for name in ("A", "B", "C"):
+    for spline in bpy.data.objects[name].data.splines:
+        for p in spline.points:
+            if p.select: selected += 1
+            else: others += 1
+note(selected == 3 and others == 6, f"exactly the cluster is selected ({selected} of {selected + others})")
+mod.extras.return_to_mesh(bpy.context, mesh_object)
+note(bpy.context.mode == "EDIT_MESH" and bpy.context.active_object is obj,
+     f"back in the mesh edit mode ({bpy.context.mode})")
+
+print("\n=== 6. constraint evaluation still runs with all three ===")
 try:
     r = bpy.ops.mesh.final_topology_optimization_step("EXEC_DEFAULT", iterations=5)
     note(r == {'FINISHED'}, f"step runs ({r})")
