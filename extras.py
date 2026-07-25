@@ -3721,6 +3721,10 @@ class VIEW3D_PT_final_topology_constraints(Panel):
                 text="Remove Selection",
             )
             op.remove = True
+            row.operator(
+                "object.final_topology_remove_selection_from_all",
+                text="From All",
+            )
 
         if len(mesh.ft_custom_constraints) > 0:
             ac = mesh.ft_custom_constraints[mesh.ft_custom_constraints_index]
@@ -3927,6 +3931,132 @@ def fill_attribute_with_selection(
 
     bpy.ops.object.mode_set(mode="EDIT")
     return attribute.name
+
+
+class RemoveSelectionFromAllConstraintsOperator(bpy.types.Operator):
+    bl_idname = "object.final_topology_remove_selection_from_all"
+    bl_label = "Remove Selection from All Constraints"
+    bl_description = (
+        "\n\nRemove the selected elements from every constraint of this mesh"
+    )
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context):
+        global _suppress_undo_push
+        mesh = context.active_object.data
+        record_constraint_undo_state(mesh)
+        _suppress_undo_push = True
+        try:
+            for c in mesh.ft_custom_constraints:
+                if not c.attribute_name:
+                    continue
+                domain = get_constraint_domain_type(c.constraint_type)
+                bm = bmesh.from_edit_mesh(mesh)
+                layers = {
+                    "POINT": bm.verts.layers.float,
+                    "EDGE": bm.edges.layers.float,
+                    "FACE": bm.faces.layers.float,
+                }.get(domain)
+                if layers is None or layers.get(c.attribute_name) is None:
+                    continue
+                add_selection_to_attribute(
+                    c.attribute_name, mesh, remove=True, domain=domain
+                )
+        finally:
+            _suppress_undo_push = False
+        clear_constraints_cache()
+        push_constraint_undo("Remove Selection from All Constraints")
+        return {"FINISHED"}
+
+
+class PinSelectionOperator(bpy.types.Operator):
+    bl_idname = "object.final_topology_pin_selection"
+    bl_label = "Pin Selection"
+    bl_description = (
+        "\n\nPin the selected vertices - adds them to the active or first pin"
+        "\nconstraint, creating one when none exists. When the whole selection"
+        "\nis already pinned, unpins it from all pin constraints instead"
+    )
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        ob = context.active_object
+        return ob is not None and ob.type == "MESH" and ob.mode == "EDIT"
+
+    def execute(self, context):
+        global _suppress_undo_push
+        mesh = context.active_object.data
+        bm = bmesh.from_edit_mesh(mesh)
+        selected = {v.index for v in bm.verts if v.select}
+        if not selected:
+            self.report({"ERROR"}, "No vertices selected")
+            return {"CANCELLED"}
+
+        pins = [c for c in mesh.ft_custom_constraints if c.constraint_type == "PIN"]
+        pinned = set()
+        for c in pins:
+            layer = (
+                bm.verts.layers.float.get(c.attribute_name)
+                if c.attribute_name
+                else None
+            )
+            if layer is not None:
+                pinned.update(v.index for v in bm.verts if v[layer] == 1.0)
+
+        record_constraint_undo_state(mesh)
+
+        if pins and selected <= pinned:
+            # the whole selection is pinned already - toggle it free again
+            _suppress_undo_push = True
+            try:
+                for c in pins:
+                    bm = bmesh.from_edit_mesh(mesh)
+                    if not c.attribute_name or bm.verts.layers.float.get(
+                        c.attribute_name
+                    ) is None:
+                        continue
+                    add_selection_to_attribute(
+                        c.attribute_name, mesh, remove=True, domain="POINT"
+                    )
+            finally:
+                _suppress_undo_push = False
+            clear_constraints_cache()
+            push_constraint_undo("Unpin Selection")
+            return {"FINISHED"}
+
+        # pin: into the active pin constraint, else the first one - and when
+        # there is none yet, a fresh one takes the selection with it
+        target = None
+        index = mesh.ft_custom_constraints_index
+        if 0 <= index < len(mesh.ft_custom_constraints):
+            active = mesh.ft_custom_constraints[index]
+            if active.constraint_type == "PIN":
+                target = active
+        if target is None and pins:
+            target = pins[0]
+        if target is None:
+            return bpy.ops.object.final_topology_add_constraint(
+                "EXEC_DEFAULT", constraint_type="PIN", name="Pin"
+            )
+
+        _suppress_undo_push = True
+        try:
+            if target.attribute_name and bm.verts.layers.float.get(
+                target.attribute_name
+            ) is not None:
+                add_selection_to_attribute(
+                    target.attribute_name, mesh, remove=False, domain="POINT"
+                )
+            else:
+                target.attribute_name = fill_attribute_with_selection(
+                    "ft_constraint", mesh, domain="POINT", new=True
+                )
+        finally:
+            _suppress_undo_push = False
+        clear_constraints_cache()
+        push_constraint_undo("Pin Selection")
+        return {"FINISHED"}
 
 
 class AddSelectionToConstraintOperator(bpy.types.Operator):
@@ -5407,6 +5537,8 @@ classes = [
     gizmos.FTPointHandleGizmo,
     CircleConstraintGizmoGroup,
     CurveConstraintGizmoGroup,
+    RemoveSelectionFromAllConstraintsOperator,
+    PinSelectionOperator,
     CurvePointTweakOperator,
     FinishCurveTweakOperator,
     VIEW3D_PT_final_topology_curve_tweak,

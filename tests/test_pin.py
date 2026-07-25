@@ -95,4 +95,39 @@ r1 = sum(v.co.length for v in free) / len(free)
 note(hold_moved < 1e-9, f"pinned verts resist snapping ({hold_moved:.2e})")
 note(r1 > r0 + 0.01, f"free verts snap toward the target sphere ({r0:.4f} -> {r1:.4f})")
 
+print("\n=== 4. pin selection toggle (Shift+P operator) ===")
+obj, ridx = ring_setup()
+mesh = obj.data
+def pin_marks():
+    bm = bmesh.from_edit_mesh(mesh); bm.verts.ensure_lookup_table(); _KEEP.append(bm)
+    marked = set()
+    for c in mesh.ft_custom_constraints:
+        if c.constraint_type != "PIN" or not c.attribute_name: continue
+        layer = bm.verts.layers.float.get(c.attribute_name)
+        if layer:
+            marked |= {v.index for v in bm.verts if v[layer] == 1.0}
+    return marked
+def select_only(ids):
+    bm = bmesh.from_edit_mesh(mesh); bm.verts.ensure_lookup_table(); _KEEP.append(bm)
+    for v in bm.verts: v.select = v.index in ids
+    bmesh.update_edit_mesh(mesh)
+# no pin constraint yet: the toggle creates one from the selection
+first = set(ridx[:3])
+select_only(first)
+r = bpy.ops.object.final_topology_pin_selection("EXEC_DEFAULT")
+pins = [c for c in mesh.ft_custom_constraints if c.constraint_type == "PIN"]
+note(r == {'FINISHED'} and len(pins) == 1, f"creates a pin constraint when none exists ({len(pins)})")
+note(pin_marks() == first, f"selection pinned ({len(pin_marks())} verts)")
+# partially new selection: adds to the existing pin, no second constraint
+second = set(ridx[2:6])
+select_only(second)
+bpy.ops.object.final_topology_pin_selection("EXEC_DEFAULT")
+pins = [c for c in mesh.ft_custom_constraints if c.constraint_type == "PIN"]
+note(len(pins) == 1, "no duplicate pin constraint created")
+note(pin_marks() == first | second, f"selection added to the existing pin ({len(pin_marks())} verts)")
+# fully pinned selection: the same operator unpins it
+select_only(second)
+bpy.ops.object.final_topology_pin_selection("EXEC_DEFAULT")
+note(pin_marks() == first - second, f"already-pinned selection gets unpinned ({sorted(pin_marks())})")
+
 print("\n" + ("ALL PASSED" if not fails else f"FAILURES: {fails}"))

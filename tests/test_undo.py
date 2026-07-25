@@ -116,6 +116,46 @@ c = obj.data.ft_custom_constraints[0]
 n3 = marked_count(obj, c.attribute_name)
 note(n3 == n1, f"one undo restores the attribute values ({n2}->{n3})")
 
+print("\n=== 5b. remove selection from ALL constraints, undoable ===")
+obj = setup()
+bpy.ops.object.final_topology_add_constraint("EXEC_DEFAULT", constraint_type="CIRCLE", name="C1")
+ui_push("Add Constraint")
+c1 = obj.data.ft_custom_constraints[0]
+# a second, point-domain constraint on part of the same ring
+bm = bmesh.from_edit_mesh(obj.data); bm.verts.ensure_lookup_table(); _KEEP.append(bm)
+ring_ids = {v.index for v in bm.verts if abs(v.co.z) < 1e-4}
+ring_half = {v.index for v in bm.verts if v.index in ring_ids and v.co.x > 0}
+for v in bm.verts: v.select = v.index in ring_ids
+bmesh.update_edit_mesh(obj.data)
+bpy.ops.object.final_topology_add_constraint("EXEC_DEFAULT", constraint_type="PIN", name="P1")
+ui_push("Add Constraint")
+c2 = obj.data.ft_custom_constraints[1]
+def edge_marks(name):
+    bm = bmesh.from_edit_mesh(obj.data); _KEEP.append(bm)
+    layer = bm.edges.layers.float.get(name)
+    return sum(1 for e in bm.edges if e[layer] == 1.0) if layer else -1
+def vert_marks(name):
+    bm = bmesh.from_edit_mesh(obj.data); _KEEP.append(bm)
+    layer = bm.verts.layers.float.get(name)
+    return sum(1 for v in bm.verts if v[layer] == 1.0) if layer else -1
+e1, v1 = edge_marks(c1.attribute_name), vert_marks(c2.attribute_name)
+note(e1 > 0 and v1 > 0, f"both constraints marked ({e1} edges, {v1} verts)")
+# select half of the ring and pull it out of every constraint at once
+bm = bmesh.from_edit_mesh(obj.data); bm.verts.ensure_lookup_table(); _KEEP.append(bm)
+for v in bm.verts: v.select = v.index in ring_half
+for e in bm.edges: e.select = e.verts[0].index in ring_half and e.verts[1].index in ring_half
+bmesh.update_edit_mesh(obj.data)
+r = bpy.ops.object.final_topology_remove_selection_from_all("EXEC_DEFAULT")
+ui_push("Remove Selection from All Constraints")
+c1 = obj.data.ft_custom_constraints[0]; c2 = obj.data.ft_custom_constraints[1]
+e2, v2 = edge_marks(c1.attribute_name), vert_marks(c2.attribute_name)
+note(r == {'FINISHED'} and e2 < e1 and v2 < v1,
+     f"selection removed from both domains ({e1}->{e2} edges, {v1}->{v2} verts)")
+bpy.ops.ed.undo()
+c1 = obj.data.ft_custom_constraints[0]; c2 = obj.data.ft_custom_constraints[1]
+e3, v3 = edge_marks(c1.attribute_name), vert_marks(c2.attribute_name)
+note(e3 == e1 and v3 == v1, f"one undo restores all assignments ({e2}->{e3} edges, {v2}->{v3} verts)")
+
 print("\n=== 6. mesh edits in between survive constraint undo ===")
 obj = setup()
 bpy.ops.object.final_topology_add_constraint("EXEC_DEFAULT", constraint_type="CIRCLE", name="C")

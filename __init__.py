@@ -580,8 +580,19 @@ def register():
         shift=False,
         alt=True,
     )
-    print("SHORTCUTS REGISTERED")
     addon_keymapitems.append(kmi)
+    if has_extras:
+        # toggle pinning of the selected vertices (PRO constraints only)
+        kmi = km.keymap_items.new(
+            "object.final_topology_pin_selection",
+            type="P",
+            value="PRESS",
+            ctrl=False,
+            shift=True,
+            alt=False,
+        )
+        addon_keymapitems.append(kmi)
+    print("SHORTCUTS REGISTERED")
 
 
     if has_extras:
