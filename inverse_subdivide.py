@@ -370,9 +370,10 @@ def prepare_inverse_subdivide(obj, bmesh_edit, bm_eval):
     # set of edit mesh verts that are influenced by the constraint.
     prep_data["neighbours"] = neighbours
     prep_data["mirror_data"] = mirror_data
-    # get target objects only if there are no constraints, 
-    # otherwise constraints do get those themselves
-    if len(obj.data.ft_custom_constraints) == 0:
+    # get target objects only if there are no constraints,
+    # otherwise constraints do get those themselves - the artists build has
+    # no constraint system at all
+    if len(getattr(obj.data, "ft_custom_constraints", [])) == 0:
         target_objects = get_target_objects()
         if len(target_objects) == 0:
             # nothing to snap to, same "no usable prep data" answer as above

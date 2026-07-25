@@ -92,8 +92,12 @@ def final_topology_optimization_step(self, context, iterations=1, neighbours=1):
     me = self.object.data
     bm_edit = bmesh.from_edit_mesh(me)
 
-    # if there are constraints and no inverse subdivide constraint, skip inverse subdivide
-    if len(self.object.data.ft_custom_constraints) > 0 and not any(c.constraint_type == "INVERSE_SUBDIVIDE" for c in self.object.data.ft_custom_constraints):
+    # if there are constraints and no inverse subdivide constraint, skip
+    # inverse subdivide - the artists build has no constraint system at all
+    constraints = []
+    if has_extras and hasattr(self.object.data, "ft_custom_constraints"):
+        constraints = self.object.data.ft_custom_constraints
+    if len(constraints) > 0 and not any(c.constraint_type == "INVERSE_SUBDIVIDE" for c in constraints):
         inverse_subdivide_prep = None
     else:
         inverse_subdivide_prep = inverse_subdivide.prepare_inverse_subdivide(
