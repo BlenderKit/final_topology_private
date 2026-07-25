@@ -110,6 +110,7 @@ for adapter_index, point_index in multi.clusters[shared][1]:
     members.append((adapter.curve_object.name, spline_index, spline_point, is_bezier))
 mesh_object = mod.extras.enter_curve_tweak(bpy.context, members)
 note(mesh_object is obj, "remembers the mesh to come back to")
+note(mod.extras._curve_tweak_state["mesh_name"] == obj.name, "return state stored")
 note(bpy.context.mode == "EDIT_CURVE", f"hopped into curve edit mode ({bpy.context.mode})")
 in_edit = {o.name for o in bpy.context.objects_in_mode}
 note(in_edit == {"A", "B", "C"}, f"all member curves entered together ({sorted(in_edit)})")
@@ -120,9 +121,14 @@ for name in ("A", "B", "C"):
             if p.select: selected += 1
             else: others += 1
 note(selected == 3 and others == 6, f"exactly the cluster is selected ({selected} of {selected + others})")
-mod.extras.return_to_mesh(bpy.context, mesh_object)
-note(bpy.context.mode == "EDIT_MESH" and bpy.context.active_object is obj,
-     f"back in the mesh edit mode ({bpy.context.mode})")
+# the back panel is available while the return state exists
+note(mod.extras.VIEW3D_PT_final_topology_curve_tweak.poll(bpy.context), "back panel shows in curve edit mode")
+note(mod.extras.FinishCurveTweakOperator.poll(bpy.context), "back operator available")
+r = bpy.ops.object.final_topology_finish_curve_tweak()
+note(r == {'FINISHED'} and bpy.context.mode == "EDIT_MESH" and bpy.context.active_object is obj,
+     f"back operator returns to the mesh edit mode ({bpy.context.mode})")
+note(mod.extras._curve_tweak_state["mesh_name"] is None, "return state cleared after coming back")
+note(not mod.extras.VIEW3D_PT_final_topology_curve_tweak.poll(bpy.context), "panel gone again")
 
 print("\n=== 6. constraint evaluation still runs with all three ===")
 try:

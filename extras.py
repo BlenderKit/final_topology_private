@@ -4779,6 +4779,9 @@ class TargetCurveControlPointsMulti:
 # members of the cluster whose handle was clicked, handed from the gizmo
 # group to the tweak operator: (curve name, spline index, point index, bezier)
 _pending_curve_tweak = []
+# where the tweak came from: the mesh to hop back to, and whether the
+# always-on modal was running there and must be restarted on return
+_curve_tweak_state = {"mesh_name": None, "restart_modal": False}
 
 
 def enter_curve_tweak(context, members):
@@ -4793,6 +4796,13 @@ def enter_curve_tweak(context, members):
             curve_objects.append(ob)
     if not curve_objects or mesh_object is None:
         return None
+
+    # the mode switch will make the always-on modal cancel itself - note it
+    # down, the way back restarts it
+    from . import final_topology as ft_main
+
+    _curve_tweak_state["mesh_name"] = mesh_object.name
+    _curve_tweak_state["restart_modal"] = ft_main.running_operator is not None
 
     bpy.ops.object.mode_set(mode="OBJECT")
     bpy.ops.object.select_all(action="DESELECT")
@@ -4819,10 +4829,12 @@ def enter_curve_tweak(context, members):
     return mesh_object
 
 
-def return_to_mesh(context, mesh_object):
-    """Back from the curve tweak into the mesh's edit mode."""
+def finish_curve_tweak(context):
+    """Back from the curve tweak into the mesh's edit mode, restarting the
+    always-on modal when it was running before the hop."""
+    mesh_object = bpy.data.objects.get(_curve_tweak_state["mesh_name"] or "")
     if mesh_object is None:
-        return
+        return False
     try:
         bpy.ops.object.mode_set(mode="OBJECT")
         bpy.ops.object.select_all(action="DESELECT")
@@ -4830,7 +4842,20 @@ def return_to_mesh(context, mesh_object):
         context.view_layer.objects.active = mesh_object
         bpy.ops.object.mode_set(mode="EDIT")
     except Exception:
-        pass
+        return False
+    if _curve_tweak_state["restart_modal"]:
+        from . import final_topology as ft_main
+
+        try:
+            # only when the old instance is really gone - invoking while one
+            # runs would toggle it off instead
+            if ft_main.running_operator is None:
+                bpy.ops.mesh.final_topology_modal("INVOKE_DEFAULT")
+        except Exception:
+            pass
+    _curve_tweak_state["mesh_name"] = None
+    _curve_tweak_state["restart_modal"] = False
+    return True
 
 
 class CurvePointTweakOperator(bpy.types.Operator):
@@ -4839,7 +4864,9 @@ class CurvePointTweakOperator(bpy.types.Operator):
     Clicking a point handle hops into the curves' edit mode, selects the
     grabbed points and starts a tweak-style translate - so the full native
     transform applies: snapping to vertices and edges, axis locking,
-    numeric input. When the drag ends, the mode hops back to the mesh.
+    numeric input. When that one drag ends, the mode hops back to the mesh;
+    if the user chains further transforms instead, they stay in curve edit
+    mode and come back with the panel button.
     """
 
     bl_idname = "object.final_topology_curve_point_tweak"
@@ -4850,32 +4877,99 @@ class CurvePointTweakOperator(bpy.types.Operator):
         members = list(_pending_curve_tweak)
         if not members:
             return {"CANCELLED"}
-        self._mesh_object = enter_curve_tweak(context, members)
-        if self._mesh_object is None:
+        if enter_curve_tweak(context, members) is None:
             return {"CANCELLED"}
         bpy.ops.transform.translate("INVOKE_DEFAULT", release_confirm=True)
+        self._saw_transform = False
+        self._had_gap = False
+        self._idle_ticks = 0
         self._timer = context.window_manager.event_timer_add(
             0.05, window=context.window
         )
         context.window_manager.modal_handler_add(self)
         return {"RUNNING_MODAL"}
 
-    def _translate_running(self, context):
+    def _transform_running(self, context):
         window = context.window
         if window is None or not hasattr(window, "modal_operators"):
             return False
         return any(
-            op.bl_idname == "TRANSFORM_OT_translate" for op in window.modal_operators
+            op.bl_idname.startswith("TRANSFORM_OT_")
+            for op in window.modal_operators
         )
 
-    def modal(self, context, event):
-        # the transform modal runs below this watcher - wait it out, then
-        # bring the user back to the mesh
-        if self._translate_running(context):
-            return {"PASS_THROUGH"}
+    def _stop(self, context):
         context.window_manager.event_timer_remove(self._timer)
-        return_to_mesh(context, self._mesh_object)
         return {"FINISHED"}
+
+    def modal(self, context, event):
+        # the transform modal runs below this watcher
+        if not bpy.data.objects.get(_curve_tweak_state["mesh_name"] or ""):
+            return self._stop(context)
+        if self._transform_running(context):
+            if self._had_gap:
+                # a second transform after the tweak drag: the user is
+                # editing on - stay in curve edit, the panel button leads back
+                return self._stop(context)
+            self._saw_transform = True
+            self._idle_ticks = 0
+            return {"PASS_THROUGH"}
+        if event.type == "TIMER":
+            self._idle_ticks += 1
+        if self._saw_transform:
+            self._had_gap = True
+            # a short grace window, in case the user chains the next
+            # transform right after releasing
+            if self._idle_ticks >= 4:
+                finish_curve_tweak(context)
+                return self._stop(context)
+        elif self._idle_ticks >= 40:
+            # the translate never showed up - don't watch forever
+            return self._stop(context)
+        return {"PASS_THROUGH"}
+
+
+class FinishCurveTweakOperator(bpy.types.Operator):
+    """Return to the mesh this curve tweak came from - restarts the
+    always-on modal if it was running when the tweak started"""
+
+    bl_idname = "object.final_topology_finish_curve_tweak"
+    bl_label = "Back to Mesh"
+
+    @classmethod
+    def poll(cls, context):
+        return bpy.data.objects.get(_curve_tweak_state["mesh_name"] or "") is not None
+
+    def execute(self, context):
+        if not finish_curve_tweak(context):
+            return {"CANCELLED"}
+        return {"FINISHED"}
+
+
+class VIEW3D_PT_final_topology_curve_tweak(Panel):
+    """The way back while editing a constraint's target curve."""
+
+    bl_label = "Final Topology"
+    bl_idname = "VIEW3D_PT_final_topology_curve_tweak"
+    bl_space_type = "VIEW_3D"
+    bl_region_type = "UI"
+    bl_category = "Edit"
+
+    @classmethod
+    def poll(cls, context):
+        return (
+            context.mode == "EDIT_CURVE"
+            and bpy.data.objects.get(_curve_tweak_state["mesh_name"] or "") is not None
+        )
+
+    def draw(self, context):
+        layout = self.layout
+        mesh_name = _curve_tweak_state["mesh_name"]
+        layout.operator(
+            FinishCurveTweakOperator.bl_idname,
+            text=f"Back to {mesh_name}",
+            icon="LOOP_BACK",
+        )
 
 
 class CurvePointsGizmoGroup(gizmos.PointHandlesGizmoGroupBase, GizmoGroup):
@@ -5314,6 +5408,8 @@ classes = [
     CircleConstraintGizmoGroup,
     CurveConstraintGizmoGroup,
     CurvePointTweakOperator,
+    FinishCurveTweakOperator,
+    VIEW3D_PT_final_topology_curve_tweak,
     CurvePointsGizmoGroup,
     PlaneConstraintGizmoGroup,
     # TransformConstraintGizmo,
