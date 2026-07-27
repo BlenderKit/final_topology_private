@@ -13,12 +13,17 @@ IGNORE_PATTERNS = [
     "tests", # test suites are for development only
 ]
 
-def pro_changes(workdir: str):
+def variant_changes(workdir: str, pro_variant: bool):
+    """Stamp the distribution identity of the variant into its manifest."""
     manifest = os.path.join(workdir, "blender_manifest.toml")
     with open(manifest, "r") as file:
         data = toml.load(file)
 
-    data["id"] = "final_topology_pro"
+    if pro_variant:
+        data["id"] = "final_topology_pro"
+        data["name"] = "Final Topology for CAD professionals"
+    else:
+        data["name"] = "Final Topology for Artists"
     with open(manifest, "w") as file:
         toml.dump(data, file)
 
@@ -45,8 +50,7 @@ def do_build(install_at: str, pro_variant: bool):
     print("- copying files...")
     shutil.copytree(src_dir, addon_build_dir, ignore=shutil.ignore_patterns(*ignore_patterns))
 
-    if pro_variant:
-        pro_changes(addon_build_dir)
+    variant_changes(addon_build_dir, pro_variant)
 
     print("- creating archive...")
     # Create zip filename with version and appropriate suffix
