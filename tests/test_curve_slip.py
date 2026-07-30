@@ -33,7 +33,7 @@ bmesh.update_edit_mesh(obj.data)
 bpy.ops.object.final_topology_add_constraint("EXEC_DEFAULT", constraint_type="CURVE", name="C")
 c = obj.data.ft_custom_constraints[0]
 c.target_curve = curve_ob
-c.curve_snapping = "3D"
+c.projection = "3D"
 c.even_distribution = False
 
 print("=== 1. verts land on the curve ===")

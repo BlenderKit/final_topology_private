@@ -8,9 +8,13 @@ from mathutils import Vector
 
 SRC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "extras.py")
 src = open(SRC).read()
+ns = {"Vector": Vector}
+# the shared loop-offset helpers live earlier in the file
+h_start = src.index("def add_loop_offset")
+h_end = src.index("def space_calculate")
+exec(compile(src[h_start:h_end], "extras_helpers", "exec"), ns)
 start = src.index("def curvature_loop_samples")
 end = src.index("def evaluate_constraints")
-ns = {"Vector": Vector}
 exec(compile(src[start:end], "extras_slice", "exec"), ns)
 curvature_loop_samples = ns["curvature_loop_samples"]
 curvature_calculate = ns["curvature_calculate"]

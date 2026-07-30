@@ -118,6 +118,92 @@ def get_connected_selections(edge_keys):
     return loops
 
 
+def sort_edges_into_loops(edges):
+    """Sort marked edges into loops, following the mesh topology.
+
+    At each vertex the walk continues through the OPPOSITE edge - the marked
+    edge sharing no face with the one it came in through, which is Blender's
+    own edge loop continuation on quad meshes. A fully selected grid thereby
+    decomposes into its two families of parallel loops, instead of the
+    arbitrary zigzag paths a plain adjacency walk produces. Where no opposite
+    exists, a sole remaining connection is followed (a loop bending around a
+    corner), several ambiguous ones end the loop (a perpendicular junction).
+    Wire edges have no faces, there the straightest continuation wins.
+
+    Returns loops as [[vertex indices], is_circular], like
+    get_connected_selections.
+    """
+    marked = list(edges)
+    vert_edges = {}
+    for edge in marked:
+        for v in edge.verts:
+            vert_edges.setdefault(v, []).append(edge)
+
+    used = set()
+
+    def continuation(v, incoming):
+        candidates = [
+            c for c in vert_edges.get(v, []) if c is not incoming and c not in used
+        ]
+        if not candidates:
+            return None
+        incoming_faces = set(incoming.link_faces)
+        opposite = [
+            c for c in candidates if not incoming_faces & set(c.link_faces)
+        ]
+        if opposite:
+            pool = opposite
+        elif len(candidates) == 1:
+            pool = candidates
+        else:
+            return None
+        if len(pool) == 1:
+            return pool[0]
+        # several equally valid continuations - take the straightest
+        direction = (v.co - incoming.other_vert(v).co).normalized()
+        return max(
+            pool,
+            key=lambda c: direction.dot((c.other_vert(v).co - v.co).normalized()),
+        )
+
+    loops = []
+    for start in marked:
+        if start in used:
+            continue
+        used.add(start)
+        chain = [start.verts[0], start.verts[1]]
+        circular = False
+
+        # forward from the chain end
+        edge = start
+        while True:
+            next_edge = continuation(chain[-1], edge)
+            if next_edge is None:
+                break
+            used.add(next_edge)
+            next_vert = next_edge.other_vert(chain[-1])
+            if next_vert is chain[0]:
+                circular = True
+                break
+            chain.append(next_vert)
+            edge = next_edge
+
+        if not circular:
+            # backward from the chain start
+            edge = start
+            while True:
+                next_edge = continuation(chain[0], edge)
+                if next_edge is None:
+                    break
+                used.add(next_edge)
+                chain.insert(0, next_edge.other_vert(chain[0]))
+                edge = next_edge
+
+        loops.append([[v.index for v in chain], circular])
+
+    return loops
+
+
 def get_attribute_elements(
     object, bm, constraint, domain="POINT", as_domain="POINT", sorted=False
 ):
@@ -141,11 +227,10 @@ def get_attribute_elements(
             val = edge[attribute_layer]
             if val == 1.0:
                 draw_elements.append(edge)
-        edge_keys = [edgekey(edge) for edge in draw_elements]
-        # use looptools to sort the edges into loops 
-        # - this makes it compatible with looptools and we can potentially 
-        # use looptools for other constraints as well.
-        loops = get_connected_selections(edge_keys)
+        # topology-aware sorting: follows edge loops through junctions, so a
+        # fully assigned grid splits into its parallel loops instead of
+        # zigzag paths
+        loops = sort_edges_into_loops(draw_elements)
 
     elif domain == "FACE":
         attribute_layer = bm.faces.layers.float[constraint.attribute_name]

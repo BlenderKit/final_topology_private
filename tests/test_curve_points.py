@@ -35,7 +35,7 @@ def make():
     bpy.ops.object.final_topology_add_constraint("EXEC_DEFAULT", constraint_type="CURVE", name="C")
     c = obj.data.ft_custom_constraints[0]
     c.target_curve = curve_ob
-    c.curve_snapping = "3D"
+    c.projection = "3D"
     return obj, c, curve_ob
 
 print("\n=== 1. adapter basics ===")

@@ -38,7 +38,7 @@ def make_ring(open_loop=False):
 
 print("=== 0. defaults ===")
 obj, c0 = make_ring()
-note(c0.curve_snapping == "3D", f"curve snapping defaults to 3D ({c0.curve_snapping})")
+note(c0.projection == "3D", f"projection defaults to 3D ({c0.projection})")
 bpy.ops.object.final_topology_add_constraint("EXEC_DEFAULT", constraint_type="CURVATURE", name="Cv")
 note(obj.data.ft_custom_constraints[1].curvature_context_steps == 0,
      f"curvature surroundings defaults to 0 (got {obj.data.ft_custom_constraints[1].curvature_context_steps})")

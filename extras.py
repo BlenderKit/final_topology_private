@@ -567,6 +567,29 @@ def ratio_spaced_tpoints(tknots, len_total):
     return tpoints
 
 
+def add_loop_offset(target_offsets, counts, index, offset):
+    """Accumulate an offset for a vertex instead of overwriting it.
+
+    On grid-like assignments a vertex belongs to two crossing loops - a row
+    and a column. Both loops' corrections must count; a plain dict write
+    would keep only whichever loop happened to be processed last, so one
+    whole direction of the grid would be silently ignored.
+    """
+    if index in target_offsets:
+        target_offsets[index] = target_offsets[index] + offset
+        counts[index] = counts.get(index, 1) + 1
+    else:
+        target_offsets[index] = offset
+
+
+def finish_loop_offsets(target_offsets, counts):
+    """Average the accumulated offsets of vertices shared by several loops."""
+    for index, count in counts.items():
+        if count > 1:
+            target_offsets[index] /= count
+    return target_offsets
+
+
 def space_calculate(loops_data, interpolation="arc", method="EVEN", step_weight=1.0):
     """Calculate positions to space vertices along loops
 
@@ -586,6 +609,7 @@ def space_calculate(loops_data, interpolation="arc", method="EVEN", step_weight=
         Dictionary mapping vertex indices to offset vectors
     """
     target_offsets = {}
+    offset_counts = {}
     step_weight = max(step_weight, 1e-3)
 
     for loop_data in loops_data:
@@ -648,9 +672,11 @@ def space_calculate(loops_data, interpolation="arc", method="EVEN", step_weight=
                 new_pos = evaluate_arc(spline_verts, spline_tknots, m)
             else:
                 new_pos = evaluate_spline(splines, spline_tknots, m, interpolation)
-            target_offsets[v.index] = (new_pos - v.co) / step_weight
+            add_loop_offset(
+                target_offsets, offset_counts, v.index, (new_pos - v.co) / step_weight
+            )
 
-    return target_offsets
+    return finish_loop_offsets(target_offsets, offset_counts)
 
 
 def wrap_loop_for_spline(verts, tknots, len_total, pad=4):
@@ -1381,7 +1407,7 @@ def check_constraints_cache(object):
                 kd = build_kd_curve_cache(
                     c.target_curve,
                     endpoints_only=endpoints_only,
-                    flatten=c.curve_snapping == "PROJECT_PLANE",
+                    flatten=c.projection == "PROJECTED",
                 )
                 cc_dict["kd"] = kd
             constraints_cache.append(cc_dict)
@@ -1636,6 +1662,7 @@ def curvature_calculate(
         Dictionary mapping vertex indices to offset vectors
     """
     target_offsets = {}
+    offset_counts = {}
 
     for loop_index, loop_data in enumerate(loops_data):
         verts = loop_data[0]
@@ -1683,9 +1710,14 @@ def curvature_calculate(
             # keep a single step from overshooting into a neighbour
             limit = max_offset_ratio * min(s["h1"], s["h2"])
             offset = max(-limit, min(limit, offset))
-            target_offsets[verts[s["index"]].index] = s["normal"] * offset
+            add_loop_offset(
+                target_offsets,
+                offset_counts,
+                verts[s["index"]].index,
+                s["normal"] * offset,
+            )
 
-    return target_offsets
+    return finish_loop_offsets(target_offsets, offset_counts)
 
 
 def walk_loop_continuation(prev_vert, end_vert, max_steps, forbidden):
@@ -1768,6 +1800,7 @@ def line_verts_calculate(
         Dictionary mapping vertex indices to offset vectors
     """
     target_offsets = {}
+    offset_counts = {}
 
     for loop_data in loops_data:
         verts = loop_data[0]
@@ -1809,9 +1842,9 @@ def line_verts_calculate(
             offset = target - v.co
             if projection_axis is not None:
                 offset -= projection_axis * offset.dot(projection_axis)
-            target_offsets[v.index] = offset
+            add_loop_offset(target_offsets, offset_counts, v.index, offset)
 
-    return target_offsets
+    return finish_loop_offsets(target_offsets, offset_counts)
 
 
 def fit_circle_to_loop(verts):
@@ -1941,6 +1974,7 @@ def circle_verts_calculate(
         Dictionary mapping vertex indices to offset vectors
     """
     target_offsets = {}
+    offset_counts = {}
 
     # first fit every loop its own circle
     fitted_loops = []
@@ -2073,9 +2107,9 @@ def circle_verts_calculate(
             if projected:
                 # solve only across the normal, the vertex keeps its own height
                 offset -= n * offset.dot(n)
-            target_offsets[vert.index] = offset
+            add_loop_offset(target_offsets, offset_counts, vert.index, offset)
 
-    return target_offsets
+    return finish_loop_offsets(target_offsets, offset_counts)
 
 
 def thickness_calculate(
@@ -2254,20 +2288,122 @@ def thickness_calculate(
     return target_offsets
 
 
-def smooth_verts_calculate(verts, factor=0.5):
-    """Smooth each vertex toward its neighbours without shrinking the shape.
+def surface_curvature_calculate(verts, factor=1.0, max_offset_ratio=0.3):
+    """Fair the patch into a curvature-continuous blend with its surroundings.
 
-    Taubin lambda/mu smoothing: a positive smoothing pass followed by a
-    slightly stronger negative pass on the provisional positions. The pair
-    filters out the high frequency wiggle a plain neighbour average would,
-    but balances away the systematic inward pull that plain averaging has -
-    important here, because the constraint reapplies every modal iteration
-    and plain averaging would deflate the mesh forever.
+    Works per quad direction: every vertex lies on two crossing edge loops,
+    and along each of them the signed profile curvature (arc-length second
+    difference against the vertex normal, the same math as the loop
+    curvature constraint) is relaxed toward the mean of its two neighbours
+    on that loop - harmonic curvature along the loop, anchored by the
+    unselected surroundings. A crease spike diffuses into a fillet whose
+    total turn is preserved, so a plane-to-wall corner rounds outward.
 
-    Vertices on boundary, wire or non-manifold edges only average across
-    those feature edges - smoothing the border as a curve instead of letting
-    the one-sided face fan drag them inwards. Feature corners and border
-    endpoints, where the count of such edges isn't two, stay anchored.
+    Doing this per direction is the point: a cylinder ring has constant
+    curvature along itself, so rings never move and necking is impossible.
+    Earlier attempts used 2D mean curvature or umbrella biharmonic fairing,
+    and both mix the circumferential direction into the profile - a change
+    of radius then reads as curvature variation and pulls walls inward.
+
+    Vertices where a direction can't be walked two steps (borders, poles,
+    non-manifold fans) skip that direction; with no usable direction they
+    stay anchored. Returns vertex index -> offset vector.
+    """
+
+    def continue_straight(prev_vert, through_edge):
+        """The edge continuing through_edge across its far vertex, or None."""
+        u = through_edge.other_vert(prev_vert)
+        candidates = [
+            e
+            for e in u.link_edges
+            if e is not through_edge and not set(e.link_faces) & set(through_edge.link_faces)
+        ]
+        if len(candidates) != 1:
+            return None
+        return candidates[0]
+
+    def walk(v, edge, steps):
+        """Vertices reached by walking straight from v through edge."""
+        chain = []
+        current, through = v, edge
+        for _ in range(steps):
+            nxt = through.other_vert(current)
+            chain.append(nxt)
+            through = continue_straight(current, through)
+            if through is None:
+                break
+            current = nxt
+        return chain
+
+    def signed_k(prev_v, v, next_v):
+        """Arc-length curvature at v along prev->v->next, on v's normal."""
+        h1 = (v.co - prev_v.co).length
+        h2 = (next_v.co - v.co).length
+        if h1 < 1e-12 or h2 < 1e-12:
+            return None
+        second = 2.0 * (h2 * prev_v.co - (h1 + h2) * v.co + h1 * next_v.co) / (
+            h1 * h2 * (h1 + h2)
+        )
+        return -second.dot(v.normal), h1, h2
+
+    target_offsets = {}
+    offset_counts = {}
+    for v in verts:
+        if not v.link_faces:
+            continue
+        # pair the edges into the two crossing loop directions
+        paired = set()
+        for edge in v.link_edges:
+            if edge in paired:
+                continue
+            partner = [
+                e
+                for e in v.link_edges
+                if e is not edge and not set(e.link_faces) & set(edge.link_faces)
+            ]
+            if len(partner) != 1:
+                continue
+            partner = partner[0]
+            paired.add(edge)
+            paired.add(partner)
+
+            back = walk(v, edge, 2)
+            fore = walk(v, partner, 2)
+            if len(back) < 2 or len(fore) < 2:
+                continue
+            own = signed_k(back[0], v, fore[0])
+            k_back = signed_k(back[1], back[0], v)
+            k_fore = signed_k(v, fore[0], fore[1])
+            if own is None or k_back is None or k_fore is None:
+                continue
+            k, h1, h2 = own
+            target = 0.5 * (k_back[0] + k_fore[0])
+            step = (target - k) * h1 * h2 * 0.5 * factor
+            limit = max_offset_ratio * min(h1, h2)
+            step = max(-limit, min(limit, step))
+            add_loop_offset(target_offsets, offset_counts, v.index, v.normal * step)
+    return finish_loop_offsets(target_offsets, offset_counts)
+
+
+def smooth_verts_calculate(verts, factor=0.5, mode="BLEND"):
+    """Smooth each vertex toward its neighbours.
+
+    BLEND pulls each vertex toward its neighbours' average, like Blender's
+    own vertex smoothing. With the region's boundary held by unselected
+    surroundings this converges to a soap-film-like transition between the
+    shapes - the mode for blending. Selecting a whole closed mesh leaves no
+    anchor, there it deflates like any Laplacian smooth would.
+
+    SHAPE is Taubin lambda/mu smoothing: a positive pass followed by a
+    slightly stronger negative pass, plus removal of the mean normal drift.
+    It filters out high frequency jaggedness while preserving the overall
+    shape and volume - the mode for polishing without losing form.
+
+    In both modes, vertices on boundary, wire or non-manifold edges only
+    average across those feature edges - smoothing the border as a curve
+    instead of letting the one-sided face fan drag them inwards. Feature
+    corners and border endpoints, where the count of such edges isn't two,
+    stay anchored.
 
     Returns a dictionary mapping vertex indices to offset vectors.
     """
@@ -2306,8 +2442,24 @@ def smooth_verts_calculate(verts, factor=0.5):
         return result
 
     first_pass = averaged({}, lam)
+    if mode == "BLEND":
+        return {v.index: first_pass[v.index] - v.co for v in neighbor_map}
+
     second_pass = averaged(first_pass, mu)
-    return {v.index: second_pass[v.index] - v.co for v in neighbor_map}
+    offsets = {v.index: second_pass[v.index] - v.co for v in neighbor_map}
+
+    # the lambda/mu pair still eats a little genuine curvature every pass,
+    # and the modal applies it endlessly - so a curved region would slowly
+    # deflate. The high frequency wiggle the smoothing is for has offsets
+    # alternating along the normals, mean near zero; the deflation is their
+    # shared inward component. Removing the mean normal drift keeps the
+    # wiggle removal and cancels the shrink.
+    if offsets:
+        drift = sum(offsets[v.index].dot(v.normal) for v in neighbor_map)
+        drift /= len(neighbor_map)
+        for v in neighbor_map:
+            offsets[v.index] = offsets[v.index] - v.normal * drift
+    return offsets
 
 
 def draw_loop_deviation(loops_data, target_offsets, matrix, alpha):
@@ -2474,7 +2626,7 @@ def evaluate_constraints(object, bmesh_edit=None, bmesh_eval=None, inverse_subdi
                         edit_loop_data = constraint_verts_loops_edit_for_endpoints[idx]
                     loop_offsets = to_curve_verts_calculate(
                         loop_data,
-                        curve_snapping=c.curve_snapping,
+                        curve_snapping="PROJECT_PLANE" if c.projection == "PROJECTED" else "3D",
                         curve_distribution="EVEN" if c.even_distribution else "ORIGINAL",
                         kd=constraints_cache[i]["kd"],
                         source_curve=c.target_curve,
@@ -2552,7 +2704,14 @@ def evaluate_constraints(object, bmesh_edit=None, bmesh_eval=None, inverse_subdi
             if c.works_on_subdivision and bmesh_eval is not None:
                 bmesh_eval.verts.ensure_lookup_table()
                 measure_verts = [bmesh_eval.verts[v.index] for v in constraint_elements_edit]
-            target_offsets = smooth_verts_calculate(measure_verts, factor=c.smooth_factor)
+            if c.smooth_mode == "CURVATURE":
+                target_offsets = surface_curvature_calculate(
+                    measure_verts, factor=c.smooth_factor
+                )
+            else:
+                target_offsets = smooth_verts_calculate(
+                    measure_verts, factor=c.smooth_factor, mode=c.smooth_mode
+                )
 
         # evaluate inclination limit constraint
         elif c.constraint_type == "INCLINATION_LIMIT":
@@ -2587,7 +2746,7 @@ def evaluate_constraints(object, bmesh_edit=None, bmesh_eval=None, inverse_subdi
                 constraint_verts_loops,
                 distribution="EVEN" if c.even_distribution else "ORIGINAL",
                 fixed_lines=fixed_lines,
-                projected=c.projected,
+                projected=c.projection == "PROJECTED",
                 draw_matrix=draw_matrix,
                 draw_color=draw_color,
             )
@@ -2613,7 +2772,7 @@ def evaluate_constraints(object, bmesh_edit=None, bmesh_eval=None, inverse_subdi
                 constraint_verts_loops,
                 distribution="EVEN" if c.even_distribution else "ORIGINAL",
                 fixed_circles=fixed_circles,
-                projected=c.projected,
+                projected=c.projection == "PROJECTED",
                 mirror_planes=mirror_data,
                 join_center=c.join_center,
                 join_normal=c.join_normal,
@@ -3419,27 +3578,21 @@ class CustomConstraint(bpy.types.PropertyGroup):
         update=update_constraint_data,
         poll=filter_curves,
     )
-    curve_snapping: bpy.props.EnumProperty(
-        name="Curve Snapping",
+    # shared by the curve, line and circle constraints
+    projection: bpy.props.EnumProperty(
+        name="Projection",
         default="3D",
         items=[
-            ("3D", "3D", "Project to curve in 3D"),
+            ("3D", "3D", "Solve the constraint fully in 3D"),
             (
-                "PROJECT_PLANE",
-                "Project on Curve plane",
-                "Project curve on the mesh and snap closest",
+                "PROJECTED",
+                "Projected",
+                "Solve the constraint only as seen along its projection axis -"
+                "\nthe curve plane, the circle normal, or the line loop's mean"
+                "\nvertex normal. Vertices keep their offset along the axis, so"
+                "\nthe shape can follow a curved surface",
             ),
         ],
-        update=update_constraint_data,
-    )
-    # shared by the line and circle constraints
-    projected: bpy.props.BoolProperty(
-        name="Projected",
-        default=False,
-        description="Solve the constraint only as seen along its projection axis -"
-        "\nthe circle normal, or the line loop's mean vertex normal."
-        "\nVertices keep their offset along the axis, so the shape can"
-        "\nfollow a curved surface, like the curve constraint's plane projection",
         update=update_constraint_data,
     )
     # shared by the curve, line and circle constraints
@@ -3549,6 +3702,34 @@ class CustomConstraint(bpy.types.PropertyGroup):
     fixed_lines: bpy.props.CollectionProperty(type=FixedLineItem)
 
     # Smooth constraint properties
+    smooth_mode: bpy.props.EnumProperty(
+        name="Mode",
+        default="BLEND",
+        items=[
+            (
+                "BLEND",
+                "Blend",
+                "Relax each vertex toward its neighbours - the region melts"
+                "\ninto its surroundings, held in place by the unselected"
+                "\nboundary. The mode for smooth transitions between shapes",
+            ),
+            (
+                "CURVATURE",
+                "Round",
+                "Fair the region into a curvature-continuous blend with its"
+                "\nsurroundings - creases round outward into fillets, walls"
+                "\nand planes keep their identity up to the selection border",
+            ),
+            (
+                "SHAPE",
+                "Keep Shape",
+                "Remove jaggedness while preserving the overall shape and"
+                "\nvolume. The mode for polishing a surface without"
+                "\ndeflating it",
+            ),
+        ],
+        update=update_constraint_data,
+    )
     smooth_factor: bpy.props.FloatProperty(
         name="Factor",
         default=0.5,
@@ -3609,6 +3790,13 @@ class CustomConstraint(bpy.types.PropertyGroup):
         update=update_circle_fix_flags,
     )
     fixed_circles: bpy.props.CollectionProperty(type=FixedCircleItem)
+
+
+def labeled_enum_row(layout, data, prop_name):
+    """A label naming the property, with its options as a button row below."""
+    col = layout.column(align=True)
+    col.label(text=data.bl_rna.properties[prop_name].name + ":")
+    col.row(align=True).prop(data, prop_name, expand=True)
 
 
 class VIEW3D_PT_final_topology_constraints(Panel):
@@ -3754,22 +3942,21 @@ class VIEW3D_PT_final_topology_constraints(Panel):
                     CurveFromSelectionOperator.bl_idname,
                     icon="CURVE_BEZCURVE",
                 )
-                layout.prop(ac, "curve_snapping")
+                labeled_enum_row(layout, ac, "projection")
                 layout.prop(ac, "even_distribution")
             
             if ac.constraint_type == "SPACE":
-                layout.prop(ac, "space_method")
-                layout.prop(ac, "space_interpolation")
+                labeled_enum_row(layout, ac, "space_method")
+                labeled_enum_row(layout, ac, "space_interpolation")
 
             if ac.constraint_type == "CURVATURE":
-                layout.prop(ac, "curvature_mode")
-                layout.prop(ac, "curvature_measure")
+                labeled_enum_row(layout, ac, "curvature_mode")
+                labeled_enum_row(layout, ac, "curvature_measure")
                 layout.prop(ac, "curvature_context_steps")
 
             if ac.constraint_type == "LINE":
-                row = layout.row()
-                row.prop(ac, "even_distribution")
-                row.prop(ac, "projected")
+                labeled_enum_row(layout, ac, "projection")
+                layout.prop(ac, "even_distribution")
                 layout.prop(ac, "fix_line")
                 if ac.fix_line:
                     for item in ac.fixed_lines:
@@ -3784,6 +3971,7 @@ class VIEW3D_PT_final_topology_constraints(Panel):
                 col.label(text="your own transforms.", icon="BLANK1")
 
             if ac.constraint_type == "SMOOTH":
+                labeled_enum_row(layout, ac, "smooth_mode")
                 layout.prop(ac, "smooth_factor")
 
             if ac.constraint_type == "THICKNESS":
@@ -3800,9 +3988,8 @@ class VIEW3D_PT_final_topology_constraints(Panel):
                 layout.prop(ac, "thickness_ray_length")
 
             if ac.constraint_type == "CIRCLE":
-                row = layout.row()
-                row.prop(ac, "even_distribution")
-                row.prop(ac, "projected")
+                labeled_enum_row(layout, ac, "projection")
+                layout.prop(ac, "even_distribution")
                 if not ac.fix_circle:
                     # e.g. concentric circles: shared axis and/or orientation
                     row = layout.row()
@@ -3830,8 +4017,7 @@ class VIEW3D_PT_final_topology_constraints(Panel):
                         "mesh.freeze_shape", text="Freeze Shape", depress=False, icon="FREEZE"
                     )
                     op.constraint_index = mesh.ft_custom_constraints_index
-                    row = layout.row()
-                    row.prop(ac, "use_object_or_collection", text="")
+                    labeled_enum_row(layout, ac, "use_object_or_collection")
                     if ac.use_object_or_collection == "OBJECT":
                         row.prop(ac, "invsubdiv_target_object", text="")
                     elif ac.use_object_or_collection == "COLLECTION":
@@ -4223,18 +4409,17 @@ class AddConstraintOperator(bpy.types.Operator):
     normal: bpy.props.FloatVectorProperty(
         name="Normal", size=3, default=(0.0, 0.0, 0.0)
     )
-    target_curve: bpy.props.PointerProperty(
-        type=bpy.types.Object, name="Target Curve", poll=filter_curves
-    )
-    curve_snapping: bpy.props.EnumProperty(
-        name="Curve Snapping",
+    # no target_curve pointer here: operators cannot register data-block
+    # pointer properties - the panel assigns the curve after adding
+    projection: bpy.props.EnumProperty(
+        name="Projection",
         default="3D",
         items=[
-            ("3D", "3D", "Project to curve in 3D"),
+            ("3D", "3D", "Solve the constraint fully in 3D"),
             (
-                "PROJECT_PLANE",
-                "Project on Curve plane",
-                "Project curve on the mesh and snap closest",
+                "PROJECTED",
+                "Projected",
+                "Solve the constraint only as seen along its projection axis",
             ),
         ],
     )
@@ -4293,6 +4478,8 @@ class AddConstraintOperator(bpy.types.Operator):
             actual_type = "CIRCLE"
         new_constraint.constraint_type = actual_type
         new_constraint.works_on_subdivision = self.works_on_subdivision
+        if actual_type in ("CURVE", "LINE", "CIRCLE"):
+            new_constraint.projection = self.projection
 
         attribute_name = f"ft_constraint"
 
@@ -4355,8 +4542,7 @@ class AddConstraintOperator(bpy.types.Operator):
         layout.prop(self, "constraint_type")
         layout.prop(self, "works_on_subdivision")
         if self.constraint_type == "CURVE":
-            layout.prop(self, "target_curve")
-            layout.prop(self, "curve_snapping")
+            labeled_enum_row(layout, self, "projection")
 
 
 def resample_polyline(points, count, cyclic):
