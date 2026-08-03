@@ -3897,6 +3897,15 @@ class VIEW3D_PT_final_topology_constraints(Panel):
         col = row.column(align=True)
         col.operator("object.final_topology_add_constraint", icon="ADD", text="")
         col.operator("object.final_topology_delete_constraint", icon="REMOVE", text="")
+        col.separator()
+        op = col.operator(
+            "object.final_topology_move_constraint", icon="TRIA_UP", text=""
+        )
+        op.direction = "UP"
+        op = col.operator(
+            "object.final_topology_move_constraint", icon="TRIA_DOWN", text=""
+        )
+        op.direction = "DOWN"
         if len(mesh.ft_custom_constraints) > 0:
             row = layout.row(align=True)
             op = row.operator(
@@ -4117,6 +4126,50 @@ def fill_attribute_with_selection(
 
     bpy.ops.object.mode_set(mode="EDIT")
     return attribute.name
+
+
+class MoveConstraintOperator(bpy.types.Operator):
+    bl_idname = "object.final_topology_move_constraint"
+    bl_label = "Move Constraint"
+    bl_description = (
+        "\n\nMove the active constraint up or down in the list."
+        "\nConstraints get evaluated in list order"
+    )
+    bl_options = {"REGISTER", "UNDO"}
+
+    direction: bpy.props.EnumProperty(
+        items=[("UP", "Up", ""), ("DOWN", "Down", "")]
+    )
+
+    @classmethod
+    def poll(cls, context):
+        ob = context.active_object
+        return (
+            ob is not None
+            and ob.type == "MESH"
+            and ob.mode == "EDIT"
+            and len(ob.data.ft_custom_constraints) > 1
+        )
+
+    def execute(self, context):
+        global _suppress_undo_push
+        mesh = context.active_object.data
+        index = mesh.ft_custom_constraints_index
+        if not (0 <= index < len(mesh.ft_custom_constraints)):
+            return {"CANCELLED"}
+        new_index = index - 1 if self.direction == "UP" else index + 1
+        if not (0 <= new_index < len(mesh.ft_custom_constraints)):
+            return {"CANCELLED"}
+        record_constraint_undo_state(mesh)
+        _suppress_undo_push = True
+        try:
+            mesh.ft_custom_constraints.move(index, new_index)
+            mesh.ft_custom_constraints_index = new_index
+        finally:
+            _suppress_undo_push = False
+        clear_constraints_cache()
+        push_constraint_undo("Move Constraint")
+        return {"FINISHED"}
 
 
 class RemoveSelectionFromAllConstraintsOperator(bpy.types.Operator):
@@ -5723,6 +5776,7 @@ classes = [
     gizmos.FTPointHandleGizmo,
     CircleConstraintGizmoGroup,
     CurveConstraintGizmoGroup,
+    MoveConstraintOperator,
     RemoveSelectionFromAllConstraintsOperator,
     PinSelectionOperator,
     CurvePointTweakOperator,

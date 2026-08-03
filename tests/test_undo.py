@@ -156,6 +156,32 @@ c1 = obj.data.ft_custom_constraints[0]; c2 = obj.data.ft_custom_constraints[1]
 e3, v3 = edge_marks(c1.attribute_name), vert_marks(c2.attribute_name)
 note(e3 == e1 and v3 == v1, f"one undo restores all assignments ({e2}->{e3} edges, {v2}->{v3} verts)")
 
+print("\n=== 5c. reorder constraints, undoable ===")
+obj = setup()
+for name, ctype in (("A", "CIRCLE"), ("B", "SPACE"), ("C", "CURVATURE")):
+    bpy.ops.object.final_topology_add_constraint("EXEC_DEFAULT", constraint_type=ctype, name=name)
+    ui_push("Add Constraint")
+def order():
+    return [c.name for c in obj.data.ft_custom_constraints]
+note(order() == ["A", "B", "C"], f"initial order ({order()})")
+note(obj.data.ft_custom_constraints_index == 2, "last added is active")
+r = bpy.ops.object.final_topology_move_constraint("EXEC_DEFAULT", direction="UP")
+ui_push("Move Constraint")
+note(r == {'FINISHED'} and order() == ["A", "C", "B"], f"active moved up ({order()})")
+note(obj.data.ft_custom_constraints_index == 1, "active index follows the constraint")
+bpy.ops.object.final_topology_move_constraint("EXEC_DEFAULT", direction="UP")
+ui_push("Move Constraint")
+note(order() == ["C", "A", "B"] and obj.data.ft_custom_constraints_index == 0,
+     f"moved to the top ({order()})")
+r = bpy.ops.object.final_topology_move_constraint("EXEC_DEFAULT", direction="UP")
+note(r == {'CANCELLED'} and order() == ["C", "A", "B"], "moving past the top does nothing")
+bpy.ops.ed.undo()
+note(order() == ["A", "C", "B"], f"one undo restores the previous order ({order()})")
+bpy.ops.object.final_topology_move_constraint("EXEC_DEFAULT", direction="DOWN")
+ui_push("Move Constraint")
+note(order() == ["A", "B", "C"] and obj.data.ft_custom_constraints_index == 2,
+     f"down goes back ({order()})")
+
 print("\n=== 6. mesh edits in between survive constraint undo ===")
 obj = setup()
 bpy.ops.object.final_topology_add_constraint("EXEC_DEFAULT", constraint_type="CIRCLE", name="C")
