@@ -57,12 +57,12 @@ Everything from the Artists edition, plus the constraint system: edit mode const
 
 ## Download
 
-Final Topology add-on is available in [Full Plan subscription](https://www.blenderkit.com/plans/pricing/) to BlenderKit.
+Final Topology add-on is available in [Full Plan subscription](https://www.blenderkit.com/plans/pricing/) to Blendkit.
 
 ## Support
 
 If you face any bug, please create a report in this repository's issue tracker: https://github.com/BlenderKit/final_topology/issues.
-If your bug is related to a specific model or project and a .blend file is required to debug the problem, please create the issue here and also send the .blend file to admin@blenderkit.com with a subject mentioning the issue number and/or title.
+If your bug is related to a specific model or project and a .blend file is required to debug the problem, please create the issue here and also send the .blend file to admin@blendkit.com with a subject mentioning the issue number and/or title.
 
 ## Basic instructions
 
