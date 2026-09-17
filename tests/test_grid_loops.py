@@ -32,25 +32,42 @@ print("=== 1. full grid decomposes into straight parallel loops ===")
 ob = grid_setup()
 bm = bmesh.from_edit_mesh(ob.data); bm.verts.ensure_lookup_table(); _KEEP.append(bm)
 n_side = round(math.sqrt(len(bm.verts)))
-loops = mod.utils.sort_edges_into_loops(list(bm.edges))
-# interior rows and columns stay separate straight loops; the border fuses
-# into one circular ring, like Blender's own boundary loop select
-interior = [l for l in loops if not l[1]]
-rings = [l for l in loops if l[1]]
-note(len(interior) == 2 * (n_side - 2) and len(rings) == 1,
-     f"interior rows/columns + one border ring ({len(interior)} + {len(rings)} for {n_side}x{n_side})")
-covered = sum(len(i) - 1 for i, _ in interior) + sum(len(i) for i, _ in rings)
+# stopping at poles (default): the grid corners are poles, so the border
+# splits into four straight open loops - every row and column is one loop
+loops = mod.utils.sort_edges_into_loops(list(bm.edges), stop_at_poles=True)
+note(len(loops) == 2 * n_side and not any(c for _, c in loops),
+     f"one open loop per row and column ({len(loops)} for {n_side}x{n_side})")
+covered = sum(len(i) - 1 for i, _ in loops)
 note(covered == len(bm.edges), f"every edge in exactly one loop ({covered}/{len(bm.edges)})")
 straight = 0
-for indices, circular in interior:
+for indices, circular in loops:
     xs = {round(bm.verts[i].co.x, 5) for i in indices}
     ys = {round(bm.verts[i].co.y, 5) for i in indices}
     if len(xs) == 1 or len(ys) == 1:
         straight += 1
-note(straight == len(interior), f"interior loops run straight along one grid direction ({straight}/{len(interior)})")
-note(all(len(indices) == n_side for indices, _ in interior),
-     "each interior loop spans the full grid width")
-note(len(rings[0][0]) == 4 * (n_side - 1), f"the ring is the whole border ({len(rings[0][0])} verts)")
+note(straight == len(loops), f"all loops run straight along one grid direction ({straight}/{len(loops)})")
+note(all(len(indices) == n_side for indices, _ in loops), "each loop spans the full grid width")
+# without the pole stop the border fuses into one ring around the corners
+loops = mod.utils.sort_edges_into_loops(list(bm.edges), stop_at_poles=False)
+rings = [l for l in loops if l[1]]
+note(len(rings) == 1 and len(rings[0][0]) == 4 * (n_side - 1),
+     f"without pole stops the border is one ring ({len(rings)} ring)")
+
+print("\n=== 1b. poles end loops: a uv sphere's meridians stop at the caps ===")
+for o in list(bpy.data.objects): bpy.data.objects.remove(o)
+bpy.ops.mesh.primitive_uv_sphere_add(segments=16, ring_count=12, radius=1.0)
+sph = bpy.context.active_object
+bpy.ops.object.mode_set(mode="EDIT")
+bm = bmesh.from_edit_mesh(sph.data); bm.verts.ensure_lookup_table(); _KEEP.append(bm)
+loops = mod.utils.sort_edges_into_loops(list(bm.edges), stop_at_poles=True)
+rings = [l for l in loops if l[1]]
+meridians = [l for l in loops if not l[1]]
+note(len(rings) == 11 and len(meridians) == 16,
+     f"11 rings + 16 pole-to-pole meridians ({len(rings)} rings, {len(meridians)} open)")
+note(all(len(m[0]) == 13 for m in meridians), "each meridian runs from pole to pole")
+loops = mod.utils.sort_edges_into_loops(list(bm.edges), stop_at_poles=False)
+note(sum(1 for l in loops if not l[1]) < 16,
+     f"without pole stops meridians run on through the poles ({len(loops)} loops)")
 
 print("\n=== 2. simple ring selections keep working as before ===")
 for o in list(bpy.data.objects): bpy.data.objects.remove(o)

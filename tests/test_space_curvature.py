@@ -130,8 +130,8 @@ note(k1 < k0 * 0.25, f"curvature evens out along the loop (spread {k0:.3f} -> {k
 
 print("\n=== 4. same-turn mode runs on a real loop ===")
 c = ob.data.ft_custom_constraints[0]
-c.curvature_mode = "SEGMENTS"
-note(c.curvature_mode == "SEGMENTS", "mode accepted")
+c.curvature_split_turns = True
+note(c.curvature_split_turns and c.curvature_mode == "BLUR", "same turn combines with the (blur by default) profile")
 r = bpy.ops.mesh.final_topology_optimization_step("EXEC_DEFAULT", iterations=30)
 bm = bmesh.from_edit_mesh(me); bm.verts.ensure_lookup_table(); _KEEP.append(bm)
 note(r == {'FINISHED'} and max(abs(v.co.y) for v in bm.verts) < 1e-5,
@@ -161,7 +161,7 @@ def curved_ring_setup():
             e.select = True; e.verts[0].select = True; e.verts[1].select = True
     bmesh.update_edit_mesh(ob.data)
     bpy.ops.object.final_topology_add_constraint("EXEC_DEFAULT", constraint_type="CURVATURE", name="Cv")
-    ob.data.ft_custom_constraints[0].curvature_mode = "SEGMENTS"
+    ob.data.ft_custom_constraints[0].curvature_split_turns = True
     return ob, ridx
 ob, ridx = curved_ring_setup()
 bpy.ops.mesh.final_topology_optimization_step("EXEC_DEFAULT", iterations=40)

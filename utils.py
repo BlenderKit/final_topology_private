@@ -118,7 +118,18 @@ def get_connected_selections(edge_keys):
     return loops
 
 
-def sort_edges_into_loops(edges):
+def is_pole(v):
+    """A vertex where edge loops end: not the regular four edges inside the
+    mesh, not the regular three on a border, not two on a wire."""
+    valence = len(v.link_edges)
+    if not v.link_faces:
+        return valence != 2
+    if v.is_boundary:
+        return valence != 3
+    return valence != 4
+
+
+def sort_edges_into_loops(edges, stop_at_poles=True):
     """Sort marked edges into loops, following the mesh topology.
 
     At each vertex the walk continues through the OPPOSITE edge - the marked
@@ -129,6 +140,12 @@ def sort_edges_into_loops(edges):
     exists, a sole remaining connection is followed (a loop bending around a
     corner), several ambiguous ones end the loop (a perpendicular junction).
     Wire edges have no faces, there the straightest continuation wins.
+
+    With stop_at_poles the walk ends at every pole (see is_pole), the way
+    Blender's own loop select does - a whole assigned area then splits into
+    the clean loops between its poles and corners instead of paths that
+    wander through them, and a plane's border becomes four straight open
+    loops rather than one ring that even spacing would round off.
 
     Returns loops as [[vertex indices], is_circular], like
     get_connected_selections.
@@ -142,6 +159,8 @@ def sort_edges_into_loops(edges):
     used = set()
 
     def continuation(v, incoming):
+        if stop_at_poles and is_pole(v):
+            return None
         candidates = [
             c for c in vert_edges.get(v, []) if c is not incoming and c not in used
         ]
@@ -230,7 +249,9 @@ def get_attribute_elements(
         # topology-aware sorting: follows edge loops through junctions, so a
         # fully assigned grid splits into its parallel loops instead of
         # zigzag paths
-        loops = sort_edges_into_loops(draw_elements)
+        loops = sort_edges_into_loops(
+            draw_elements, stop_at_poles=getattr(constraint, "stop_at_poles", True)
+        )
 
     elif domain == "FACE":
         attribute_layer = bm.faces.layers.float[constraint.attribute_name]

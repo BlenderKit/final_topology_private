@@ -18,7 +18,8 @@ end = src.index("def evaluate_constraints")
 exec(compile(src[start:end], "extras_slice", "exec"), ns)
 curvature_loop_samples = ns["curvature_loop_samples"]
 curvature_calculate = ns["curvature_calculate"]
-segment_curvature_targets = ns["segment_curvature_targets"]
+same_turn_runs = ns["same_turn_runs"]
+profile_targets = ns["profile_targets"]
 
 class FakeVert:
     def __init__(self, co, normal, index):
@@ -107,7 +108,7 @@ after = linear_residual(open_loop)
 print(f"{'PASS' if after < before else 'FAIL'}  LINEAR reduces residual: {before:.4f} -> {after:.4f}")
 if after >= before: fails.append("linear open")
 
-# --- SEGMENTS mode: same-turn bows keep their own curvature ---
+# --- Same Turn: same-turn bows keep their own curvature ---
 def s_curve(noise=0.0, count_a=14, count_b=12):
     """Arc of radius 1 turning left, then tangentially an arc of radius 0.6
     turning right - an S. Normals are the consistent left-normals of the
@@ -144,7 +145,11 @@ def refresh_normals(verts):
 loop, count_a = s_curve()
 samples = curvature_loop_samples(loop[0], False)
 weights = [(s["h1"] + s["h2"]) * 0.5 for s in samples]
-targets = segment_curvature_targets(samples, weights, False)
+runs = same_turn_runs(samples, weights, False)
+targets = [0.0] * len(samples)
+for run in runs:
+    for i, tgt in zip(run, profile_targets([samples[i] for i in run], [weights[i] for i in run], "CONSTANT", False)):
+        targets[i] = tgt
 distinct = sorted({round(t, 3) for t in targets})
 print(f"{'PASS' if len(distinct) == 2 else 'FAIL'}  S-curve splits into two segments: targets {distinct}")
 if len(distinct) != 2: fails.append("segment count")
@@ -167,16 +172,16 @@ def bow_spread(loop, count_a):
 noisy, count_a = s_curve(noise=0.004)
 spread0 = bow_spread(noisy, count_a)
 for _ in range(120):
-    offs = curvature_calculate([noisy], mode="SEGMENTS")
+    offs = curvature_calculate([noisy], mode="CONSTANT", split_turns=True)
     for v in noisy[0]:
         if v.index in offs: v.co += offs[v.index] * 0.3
     refresh_normals(noisy[0])
 spread1 = bow_spread(noisy, count_a)
 ma, mb = bow_means(noisy, count_a)
-print(f"{'PASS' if spread1 < spread0 * 0.35 else 'FAIL'}  SEGMENTS evens each bow: spread {spread0:.3f} -> {spread1:.3f}")
+print(f"{'PASS' if spread1 < spread0 * 0.35 else 'FAIL'}  Same Turn evens each bow: spread {spread0:.3f} -> {spread1:.3f}")
 if spread1 >= spread0 * 0.35: fails.append("segments even")
 ok = ma * mb < 0 and 0.6 < abs(ma) < 1.3 and 1.2 < abs(mb) < 2.1
-print(f"{'PASS' if ok else 'FAIL'}  SEGMENTS keeps the S: bow means {ma:.2f} / {mb:.2f}")
+print(f"{'PASS' if ok else 'FAIL'}  Same Turn keeps the S: bow means {ma:.2f} / {mb:.2f}")
 if not ok: fails.append("segments keep S")
 
 # CONSTANT on the same S pulls both bows toward one shared value
@@ -205,7 +210,7 @@ def ring_with_dent(first, last, depth):
 def segment_count(loop):
     samples = curvature_loop_samples(loop[0], loop[1])
     weights = [(s["h1"] + s["h2"]) * 0.5 for s in samples]
-    return len({round(t, 3) for t in segment_curvature_targets(samples, weights, loop[1])})
+    return len(same_turn_runs(samples, weights, loop[1]))
 # a deep dent is a concave bow of its own; the convex rest joins across the
 # seam (a shallow dent stays convex all the way and would be one segment)
 n_seg = segment_count(ring_with_dent(10, 22, 0.5))
@@ -220,6 +225,75 @@ if n_seg != 2: fails.append("single vertex turn")
 n_seg = segment_count(ring_with_dent(12, 14, 0.005))
 print(f"{'PASS' if n_seg == 1 else 'FAIL'}  a same-direction nudge does not split ({n_seg} segments)")
 if n_seg != 1: fails.append("same direction nudge")
+
+# Same Turn combined with the LINEAR profile: each bow fits its own rate of
+# change, so the S survives here too and both bows converge to a line fit
+sweep, count_a = s_curve(noise=0.004)
+for _ in range(120):
+    offs = curvature_calculate([sweep], mode="LINEAR", split_turns=True)
+    for v in sweep[0]:
+        if v.index in offs: v.co += offs[v.index] * 0.3
+    refresh_normals(sweep[0])
+la, lb = bow_means(sweep, count_a)
+samples = curvature_loop_samples(sweep[0], False)
+weights = [(s["h1"] + s["h2"]) * 0.5 for s in samples]
+worst_fit = 0.0
+for run in same_turn_runs(samples, weights, False):
+    if len(run) < 3: continue
+    sub = [samples[i] for i in run]; sw = [weights[i] for i in run]
+    fitted = profile_targets(sub, sw, "LINEAR", False)
+    worst_fit = max(worst_fit, max(abs(f - s["k"]) for f, s in zip(fitted, sub)))
+ok = la * lb < 0
+print(f"{'PASS' if ok else 'FAIL'}  Same Turn + LINEAR keeps the S: bow means {la:.2f} / {lb:.2f}")
+if not ok: fails.append("linear split keeps S")
+ok = worst_fit < 0.05
+print(f"{'PASS' if ok else 'FAIL'}  and each bow settles on its own linear curvature (worst residual {worst_fit:.3f})")
+if not ok: fails.append("linear split fit")
+
+# --- BLUR: local evening that flows through a pinned vertex ---
+# two pins displaced opposite ways: together with the anchored ends they
+# don't lie on any one circle, so a single constant curvature is impossible
+def arc_with_pins(count=20):
+    loop = circle_loop(1.0, count, circular=False); loop[1] = False
+    pins = (count // 3, 2 * count // 3)
+    loop[0][pins[0]].co *= 1.10
+    loop[0][pins[1]].co *= 0.90
+    for v in loop[0]:
+        v.normal = Vector((v.co.x, v.co.y, 0)).normalized()
+    return loop, set(pins)
+# blur is a diffusion, it needs more iterations than the global constant -
+# which converges fast but stalls with permanent kinks at the pins
+def run_pinned(mode, iters=1500):
+    loop, pins = arc_with_pins()
+    for _ in range(iters):
+        offs = curvature_calculate([loop], mode=mode)
+        for v in loop[0]:
+            if v.index in offs and v.index not in pins:   # pins never move
+                v.co += offs[v.index] * 0.3
+        for v in loop[0]:
+            v.normal = Vector((v.co.x, v.co.y, 0)).normalized()
+    ks = [s["k"] for s in curvature_loop_samples(loop[0], False)]
+    jumps = [abs(ks[i + 1] - ks[i]) for i in range(len(ks) - 1)]
+    return max(jumps)
+kink_constant = run_pinned("CONSTANT")
+kink_blur = run_pinned("BLUR")
+ok = kink_blur < kink_constant * 0.5
+print(f"{'PASS' if ok else 'FAIL'}  BLUR flows through pinned vertices, CONSTANT kinks around them (max curvature jump {kink_blur:.3f} vs {kink_constant:.3f})")
+if not ok: fails.append("blur through pin")
+
+# on a dented closed ring, blurring diffuses the dent away like CONSTANT does
+ring = circle_loop(1.0, 32)
+ring[0][8].co *= 0.8
+before = curvature_spread(ring)
+for _ in range(150):
+    offs = curvature_calculate([ring], mode="BLUR")
+    for v in ring[0]:
+        if v.index in offs: v.co += offs[v.index] * 0.3
+    for v in ring[0]:
+        v.normal = Vector((v.co.x, v.co.y, 0)).normalized()
+after = curvature_spread(ring)
+print(f"{'PASS' if after < before * 0.25 else 'FAIL'}  BLUR relaxes a dent: {before:.4f} -> {after:.4f}")
+if after >= before * 0.25: fails.append("blur dent")
 
 print("\n" + ("ALL PASSED" if not fails else f"FAILURES: {fails}"))
 sys.exit(1 if fails else 0)

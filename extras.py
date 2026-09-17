@@ -1638,20 +1638,19 @@ def fit_linear_curvature(samples, weights):
     return [a + b * s["t"] for s in samples]
 
 
-def segment_curvature_targets(samples, weights, is_circular):
-    """One target curvature per same-turn segment of the loop.
+def same_turn_runs(samples, weights, is_circular):
+    """Split the loop's samples into runs turning the same way.
 
-    The loop splits wherever the signed curvature of a vertex flips sign -
-    the turn direction crosses 180 degrees there. Each run of vertices
-    bending the same way gets the weighted mean curvature of that run, so
-    an S-curve keeps both of its bows as arcs instead of being averaged
-    toward one straight-ish curvature.
+    A new run starts wherever the signed curvature of a vertex flips sign -
+    the turn direction crosses 180 degrees there. The turn is read from
+    every single vertex, no smoothing: in subdivision modelling one vertex
+    can define the turn the modeller wants, and a one-vertex run is a
+    segment of its own. Only a curvature far below float noise counts as
+    neutral and stays with the run it's in, so an exactly straight stretch
+    doesn't split on rounding. On a closed loop the two runs meeting at the
+    seam join when they turn the same way.
 
-    The turn is read from every single vertex, no smoothing: in subdivision
-    modelling one vertex can define the turn the modeller wants, and a
-    one-vertex run simply keeps its own curvature. Only a curvature far
-    below float noise counts as neutral and stays with the run it's in, so
-    an exactly straight stretch doesn't split on rounding.
+    Returns a list of runs, each a list of sample positions in loop order.
     """
     n = len(samples)
     ks = [s["k"] for s in samples]
@@ -1683,19 +1682,46 @@ def segment_curvature_targets(samples, weights, is_circular):
     ):
         # the seam sits inside one bow - join the two runs across it
         runs[0][1] = runs[-1][1] + runs[0][1]
-        if runs[0][0] == 0:
-            runs[0][0] = runs[-1][0]
         runs.pop()
+    return [run for sign, run in runs]
 
-    targets = [0.0] * n
-    for sign, run in runs:
-        run_w = sum(weights[i] for i in run)
-        if run_w < 1e-12:
-            continue
-        average = sum(weights[i] * ks[i] for i in run) / run_w
-        for i in run:
-            targets[i] = average
-    return targets
+
+def profile_targets(samples, weights, mode, is_circular, blur_radius=1):
+    """Target curvature per sample for one stretch of loop: one shared value
+    for CONSTANT, a fitted constant rate of change for LINEAR, or for BLUR
+    the weighted mean over each sample's neighbours within blur_radius. A
+    rate of change can't close on itself, so a circular stretch always
+    gets the constant.
+
+    BLUR is local: nothing forces a single profile onto the whole stretch,
+    every vertex only wants to agree with its neighbours. Over the
+    iterations the curvature diffuses into a smooth field, so a pinned
+    vertex bends the loop smoothly instead of standing in the way of one
+    global target and turning into a corner.
+    """
+    if mode == "BLUR":
+        n = len(samples)
+        targets = []
+        for i in range(n):
+            total = 0.0
+            total_w = 0.0
+            for d in range(-blur_radius, blur_radius + 1):
+                j = i + d
+                if is_circular:
+                    j %= n
+                elif not (0 <= j < n):
+                    continue
+                total += weights[j] * samples[j]["k"]
+                total_w += weights[j]
+            targets.append(total / total_w if total_w > 1e-12 else samples[i]["k"])
+        return targets
+    if mode == "LINEAR" and not is_circular and len(samples) >= 3:
+        return fit_linear_curvature(samples, weights)
+    sum_w = sum(weights)
+    if sum_w < 1e-12:
+        return [s["k"] for s in samples]
+    average = sum(w * s["k"] for w, s in zip(weights, samples)) / sum_w
+    return [average] * len(samples)
 
 
 def curvature_calculate(
@@ -1704,6 +1730,8 @@ def curvature_calculate(
     max_offset_ratio=0.5,
     measure="LENGTH",
     movable_ranges=None,
+    split_turns=False,
+    blur_radius=1,
 ):
     """Push vertices along their normals so the loop keeps an even curvature.
 
@@ -1711,8 +1739,13 @@ def curvature_calculate(
         loops_data: List of loops, each as [verts_list, is_circular]
         mode: 'CONSTANT' for one curvature along the loop (an arc),
               'LINEAR' for a curvature that changes at a constant rate,
-              'SEGMENTS' for one curvature per same-turn segment - the loop
-              splits where its turn direction flips.
+              'BLUR' for each vertex aiming at its neighbours' mean curvature
+              within blur_radius - a local evening that diffuses through
+              pinned vertices instead of kinking around them.
+        split_turns: split the loop where its turn direction flips and apply
+            the profile to every same-turn segment on its own - an S-curve
+            keeps both bows, each an arc (CONSTANT) or a spiral-like sweep
+            (LINEAR), instead of being averaged into one profile.
         measure: 'LENGTH' evens out the true curvature, 'ANGLE' evens out the
             turn angle per vertex regardless of segment lengths.
         movable_ranges: optional list of (start, end) index ranges per loop.
@@ -1746,15 +1779,22 @@ def curvature_calculate(
         if sum_w < 1e-9:
             continue
 
-        # a curvature changing at a constant rate can't close on itself,
-        # so circular loops always aim for a single curvature
-        if mode == "LINEAR" and not is_circular and len(samples) >= 3:
-            targets = fit_linear_curvature(samples, weights)
-        elif mode == "SEGMENTS":
-            targets = segment_curvature_targets(samples, weights, is_circular)
+        if split_turns:
+            # every same-turn segment gets the profile on its own; a segment
+            # is an open stretch even on a closed loop, unless it's the
+            # whole loop
+            targets = [0.0] * len(samples)
+            runs = same_turn_runs(samples, weights, is_circular)
+            for run in runs:
+                run_circular = is_circular and len(runs) == 1
+                run_targets = profile_targets(
+                    [samples[i] for i in run], [weights[i] for i in run],
+                    mode, run_circular, blur_radius,
+                )
+                for i, target in zip(run, run_targets):
+                    targets[i] = target
         else:
-            average = sum(w * s["k"] for w, s in zip(weights, samples)) / sum_w
-            targets = [average] * len(samples)
+            targets = profile_targets(samples, weights, mode, is_circular, blur_radius)
 
         movable = None
         if movable_ranges is not None:
@@ -2902,6 +2942,8 @@ def evaluate_constraints(object, bmesh_edit=None, bmesh_eval=None, inverse_subdi
                 mode=c.curvature_mode,
                 measure=c.curvature_measure,
                 movable_ranges=movable_ranges,
+                split_turns=c.curvature_split_turns,
+                blur_radius=c.curvature_blur_radius,
             )
 
         # evaluate space constraint
@@ -3027,7 +3069,18 @@ def update_constraint_index(self, context):
     bm = bmesh.from_edit_mesh(context.object.data)
     draw.clear_draw_list()
     domain = get_constraint_domain_type(constraint.constraint_type)
-    
+
+    # show the constraint's elements in the select mode they live in - a
+    # pin's vertices are invisible in edge mode, and a loop constraint in
+    # vertex mode lights up edges that aren't part of it
+    select_mode = {
+        "POINT": (True, False, False),
+        "EDGE": (False, True, False),
+        "FACE": (False, False, True),
+    }.get(domain)
+    if select_mode is not None and tuple(context.tool_settings.mesh_select_mode) != select_mode:
+        context.tool_settings.mesh_select_mode = select_mode
+
     try:
         elements = utils.get_attribute_elements(
             context.object, bm, constraint, domain=domain, as_domain=domain
@@ -3037,6 +3090,8 @@ def update_constraint_index(self, context):
             bpy.ops.mesh.select_all(action="DESELECT")
             for e in elements:
                 e.select = True
+            bm.select_flush_mode()
+            bmesh.update_edit_mesh(context.object.data)
     except:
         pass
 
@@ -3582,6 +3637,16 @@ class CustomConstraint(bpy.types.PropertyGroup):
         update=update_constraint_data,
     )
     enabled: bpy.props.BoolProperty(name="Enabled", default=True)
+    stop_at_poles: bpy.props.BoolProperty(
+        name="Stop at Poles",
+        default=True,
+        description="End loops at poles and corners - vertices without the"
+        "\nregular four edges - like Blender's loop select does. A whole"
+        "\nassigned area then splits into clean loops between its poles"
+        "\ninstead of paths wandering through them. Off, a loop keeps going"
+        "\nthrough a pole where it can",
+        update=update_constraint_data,
+    )
     works_on_subdivision: bpy.props.BoolProperty(
         name="Works on Subdivision",
         default=False,
@@ -3714,8 +3779,15 @@ class CustomConstraint(bpy.types.PropertyGroup):
     # Curvature constraint properties
     curvature_mode: bpy.props.EnumProperty(
         name="Curvature",
-        default="CONSTANT",
+        default="BLUR",
         items=[
+            (
+                "BLUR",
+                "Blur",
+                "Each vertex aims at the mean curvature of its neighbours"
+                "\nalong the loop - a local evening that diffuses smoothly"
+                "\nthrough pinned vertices instead of kinking around them",
+            ),
             (
                 "CONSTANT",
                 "Constant",
@@ -3727,15 +3799,25 @@ class CustomConstraint(bpy.types.PropertyGroup):
                 "Let the curvature change at a constant rate along the loop."
                 "\nClosed loops fall back to constant curvature",
             ),
-            (
-                "SEGMENTS",
-                "Same Turn",
-                "One curvature per segment turning the same way - the loop"
-                "\nsplits wherever its turn direction flips, so an S-curve"
-                "\nkeeps both bows as arcs instead of averaging to one",
-            ),
         ],
         description="Curvature profile the loop is pushed towards",
+        update=update_constraint_data,
+    )
+    curvature_blur_radius: bpy.props.IntProperty(
+        name="Blur Size",
+        default=1,
+        min=1,
+        soft_max=5,
+        description="How many neighbours to each side a vertex averages its"
+        "\ncurvature with. Larger sizes even out longer stretches per step",
+        update=update_constraint_data,
+    )
+    curvature_split_turns: bpy.props.BoolProperty(
+        name="Same Turn",
+        default=False,
+        description="Split the loop wherever its turn direction flips and"
+        "\napply the profile to every same-turn segment on its own - an"
+        "\nS-curve keeps both of its bows instead of averaging into one",
         update=update_constraint_data,
     )
     curvature_measure: bpy.props.EnumProperty(
@@ -4007,6 +4089,8 @@ class VIEW3D_PT_final_topology_constraints(Panel):
             layout.prop(ac, "constraint_type")
             if ac.constraint_type not in ("INVERSE_SUBDIVIDE", "PIN"):
                 layout.prop(ac, "works_on_subdivision")
+            if get_constraint_domain_type(ac.constraint_type) == "EDGE":
+                layout.prop(ac, "stop_at_poles")
 
             if ac.constraint_type == "PLANE":
                 row = layout.row()
@@ -4038,7 +4122,10 @@ class VIEW3D_PT_final_topology_constraints(Panel):
 
             if ac.constraint_type == "CURVATURE":
                 labeled_enum_row(layout, ac, "curvature_mode")
+                if ac.curvature_mode == "BLUR":
+                    layout.prop(ac, "curvature_blur_radius")
                 labeled_enum_row(layout, ac, "curvature_measure")
+                layout.prop(ac, "curvature_split_turns")
                 layout.prop(ac, "curvature_context_steps")
 
             if ac.constraint_type == "LINE":

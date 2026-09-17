@@ -182,6 +182,28 @@ ui_push("Move Constraint")
 note(order() == ["A", "B", "C"] and obj.data.ft_custom_constraints_index == 2,
      f"down goes back ({order()})")
 
+print("\n=== 5d. selecting a constraint switches to its select mode ===")
+obj = setup()  # edge mode, ring selected
+bpy.ops.object.final_topology_add_constraint("EXEC_DEFAULT", constraint_type="CIRCLE", name="Ring")
+bm = bmesh.from_edit_mesh(obj.data); bm.verts.ensure_lookup_table(); _KEEP.append(bm)
+top = {v.index for v in bm.verts if v.co.z > 0.9}
+for v in bm.verts: v.select = v.index in top
+bmesh.update_edit_mesh(obj.data)
+bpy.ops.object.final_topology_add_constraint("EXEC_DEFAULT", constraint_type="PIN", name="Top")
+bpy.context.tool_settings.mesh_select_mode = (False, False, True)  # face mode, wrong for both
+obj.data.ft_custom_constraints_index = 1  # the pin
+note(tuple(bpy.context.tool_settings.mesh_select_mode) == (True, False, False),
+     f"pin constraint switches to vertex mode ({tuple(bpy.context.tool_settings.mesh_select_mode)})")
+bm = bmesh.from_edit_mesh(obj.data); bm.verts.ensure_lookup_table(); _KEEP.append(bm)
+note({v.index for v in bm.verts if v.select} == top, "and shows exactly the pinned vertices")
+obj.data.ft_custom_constraints_index = 0  # the ring
+note(tuple(bpy.context.tool_settings.mesh_select_mode) == (False, True, False),
+     f"loop constraint switches to edge mode ({tuple(bpy.context.tool_settings.mesh_select_mode)})")
+bm = bmesh.from_edit_mesh(obj.data); bm.verts.ensure_lookup_table(); _KEEP.append(bm)
+layer = bm.edges.layers.float.get(obj.data.ft_custom_constraints[0].attribute_name)
+note({e.index for e in bm.edges if e.select} == {e.index for e in bm.edges if e[layer] == 1.0},
+     "and shows exactly the constraint's edges")
+
 print("\n=== 6. mesh edits in between survive constraint undo ===")
 obj = setup()
 bpy.ops.object.final_topology_add_constraint("EXEC_DEFAULT", constraint_type="CIRCLE", name="C")
