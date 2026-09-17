@@ -295,5 +295,25 @@ after = curvature_spread(ring)
 print(f"{'PASS' if after < before * 0.25 else 'FAIL'}  BLUR relaxes a dent: {before:.4f} -> {after:.4f}")
 if after >= before * 0.25: fails.append("blur dent")
 
+# --- reference: surface normal vs loop ---
+# a loop snaking sideways on a flat plane (normals all +Z): no bending against
+# the normal at all, but plenty of bending as a space curve
+snake = []
+for i in range(14):
+    snake.append(FakeVert((i * 0.3, 0.25 * math.sin(i * 1.1), 0.0), (0, 0, 1), i))
+k_normal = [s["k"] for s in curvature_loop_samples(snake, False, reference="NORMAL")]
+k_loop = [s["k"] for s in curvature_loop_samples(snake, False, reference="LOOP")]
+ok = max(abs(k) for k in k_normal) < 1e-9 and max(abs(k) for k in k_loop) > 0.5
+print(f"{'PASS' if ok else 'FAIL'}  sideways snake: normal reference sees nothing ({max(abs(k) for k in k_normal):.1e}), loop reference sees the bends ({max(abs(k) for k in k_loop):.2f})")
+if not ok: fails.append("reference snake")
+# on a circle with radial normals both references agree exactly
+ring = circle_loop(1.0, 32)
+kn = [s["k"] for s in curvature_loop_samples(ring[0], True, reference="NORMAL")]
+kl = [s["k"] for s in curvature_loop_samples(ring[0], True, reference="LOOP")]
+# mathutils vectors are float32, so "exactly radial" holds to ~1e-7
+ok = max(abs(a - b) for a, b in zip(kn, kl)) < 1e-5
+print(f"{'PASS' if ok else 'FAIL'}  circle: both references agree (1/r = {sum(kl)/len(kl):.4f})")
+if not ok: fails.append("reference circle")
+
 print("\n" + ("ALL PASSED" if not fails else f"FAILURES: {fails}"))
 sys.exit(1 if fails else 0)

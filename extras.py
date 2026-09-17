@@ -1535,8 +1535,14 @@ def inclination_limit_calculate(
     return target_offsets
 
 
-def curvature_loop_samples(verts, is_circular, measure="LENGTH"):
+def curvature_loop_samples(verts, is_circular, measure="LENGTH", reference="NORMAL"):
     """Measure curvature at every vertex of a loop that has one on both sides.
+
+    reference 'NORMAL' projects the bending onto the vertex normal: only the
+    in/out bending against the surface counts, sideways turning within the
+    surface is ignored. reference 'LOOP' takes the full bending of the loop
+    as a space curve, whichever way it turns, signed by the side of the
+    normal it bends toward - sideways turns then count as curvature too.
 
     measure 'LENGTH' uses the arc length parametrization, so both the parameter
     and the second derivative are built from the real edge lengths - the
@@ -1600,13 +1606,18 @@ def curvature_loop_samples(verts, is_circular, measure="LENGTH"):
             # decides how tightly the shape may turn
             d1 = (co - prev_co) / h1
             d2 = (next_co - co) / h2
-            k = -(d2 - d1).dot(normal)
+            bending = d2 - d1
         else:
             # second derivative on an unevenly spaced grid
-            second_derivative = (
+            bending = (
                 prev_co * h2 - co * (h1 + h2) + next_co * h1
             ) * (2.0 / (h1 * h2 * (h1 + h2)))
-            k = -second_derivative.dot(normal)
+        along_normal = -bending.dot(normal)
+        if reference == "LOOP":
+            # the whole bend, signed by which side of the normal it leans to
+            k = bending.length if along_normal >= 0 else -bending.length
+        else:
+            k = along_normal
 
         samples.append(
             {
@@ -1732,6 +1743,7 @@ def curvature_calculate(
     movable_ranges=None,
     split_turns=False,
     blur_radius=1,
+    reference="NORMAL",
 ):
     """Push vertices along their normals so the loop keeps an even curvature.
 
@@ -1765,7 +1777,7 @@ def curvature_calculate(
         if len(verts) < 3:
             continue
 
-        samples = curvature_loop_samples(verts, is_circular, measure)
+        samples = curvature_loop_samples(verts, is_circular, measure, reference)
         if len(samples) < 2:
             continue
 
@@ -2944,6 +2956,7 @@ def evaluate_constraints(object, bmesh_edit=None, bmesh_eval=None, inverse_subdi
                 movable_ranges=movable_ranges,
                 split_turns=c.curvature_split_turns,
                 blur_radius=c.curvature_blur_radius,
+                reference=c.curvature_reference,
             )
 
         # evaluate space constraint
@@ -3647,6 +3660,15 @@ class CustomConstraint(bpy.types.PropertyGroup):
         "\nthrough a pole where it can",
         update=update_constraint_data,
     )
+    stop_at_turns: bpy.props.BoolProperty(
+        name="Stop at Turns",
+        default=True,
+        description="A loop only passes a regular four-edge crossing straight"
+        "\nthrough. Where the assigned edges bend around such a crossing"
+        "\ninstead, the loop ends and the bend starts a new one - an"
+        "\nL-shaped selection is two loops, not one with a corner",
+        update=update_constraint_data,
+    )
     works_on_subdivision: bpy.props.BoolProperty(
         name="Works on Subdivision",
         default=False,
@@ -3801,6 +3823,26 @@ class CustomConstraint(bpy.types.PropertyGroup):
             ),
         ],
         description="Curvature profile the loop is pushed towards",
+        update=update_constraint_data,
+    )
+    curvature_reference: bpy.props.EnumProperty(
+        name="Reference",
+        default="NORMAL",
+        items=[
+            (
+                "NORMAL",
+                "Surface Normal",
+                "Measure only the bending against the surface normal - a"
+                "\nloop turning sideways within the surface has no curvature",
+            ),
+            (
+                "LOOP",
+                "Loop",
+                "Measure the full bending of the loop as a space curve,"
+                "\nsideways turns included, signed by the side of the normal",
+            ),
+        ],
+        description="What the loop's bending is measured against",
         update=update_constraint_data,
     )
     curvature_blur_radius: bpy.props.IntProperty(
@@ -4090,7 +4132,9 @@ class VIEW3D_PT_final_topology_constraints(Panel):
             if ac.constraint_type not in ("INVERSE_SUBDIVIDE", "PIN"):
                 layout.prop(ac, "works_on_subdivision")
             if get_constraint_domain_type(ac.constraint_type) == "EDGE":
-                layout.prop(ac, "stop_at_poles")
+                row = layout.row()
+                row.prop(ac, "stop_at_poles")
+                row.prop(ac, "stop_at_turns")
 
             if ac.constraint_type == "PLANE":
                 row = layout.row()
@@ -4125,6 +4169,7 @@ class VIEW3D_PT_final_topology_constraints(Panel):
                 if ac.curvature_mode == "BLUR":
                     layout.prop(ac, "curvature_blur_radius")
                 labeled_enum_row(layout, ac, "curvature_measure")
+                labeled_enum_row(layout, ac, "curvature_reference")
                 layout.prop(ac, "curvature_split_turns")
                 layout.prop(ac, "curvature_context_steps")
 

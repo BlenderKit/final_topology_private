@@ -53,6 +53,21 @@ rings = [l for l in loops if l[1]]
 note(len(rings) == 1 and len(rings[0][0]) == 4 * (n_side - 1),
      f"without pole stops the border is one ring ({len(rings)} ring)")
 
+print("\n=== 1a. turns end loops: an L-shaped selection is two loops ===")
+bm = bmesh.from_edit_mesh(ob.data); bm.verts.ensure_lookup_table(); _KEEP.append(bm)
+# a row from the left edge to an interior crossing, then a column going up from it
+corner = min((v for v in bm.verts if v.co.x > 0.05 and v.co.y > 0.05), key=lambda v: v.co.length)
+row_edges = [e for e in bm.edges if abs(e.verts[0].co.y - corner.co.y) < 1e-5 and abs(e.verts[1].co.y - corner.co.y) < 1e-5
+             and max(e.verts[0].co.x, e.verts[1].co.x) <= corner.co.x + 1e-5]
+col_edges = [e for e in bm.edges if abs(e.verts[0].co.x - corner.co.x) < 1e-5 and abs(e.verts[1].co.x - corner.co.x) < 1e-5
+             and min(e.verts[0].co.y, e.verts[1].co.y) >= corner.co.y - 1e-5]
+l_edges = row_edges + col_edges
+note(len(corner.link_edges) == 4, "the corner is a regular four-edge crossing")
+loops = mod.utils.sort_edges_into_loops(l_edges, stop_at_poles=True, stop_at_turns=True)
+note(len(loops) == 2 and all(not c for _, c in loops), f"with stop at turns the L is two loops ({len(loops)})")
+loops = mod.utils.sort_edges_into_loops(l_edges, stop_at_poles=True, stop_at_turns=False)
+note(len(loops) == 1, f"without it the loop turns the corner as one ({len(loops)})")
+
 print("\n=== 1b. poles end loops: a uv sphere's meridians stop at the caps ===")
 for o in list(bpy.data.objects): bpy.data.objects.remove(o)
 bpy.ops.mesh.primitive_uv_sphere_add(segments=16, ring_count=12, radius=1.0)

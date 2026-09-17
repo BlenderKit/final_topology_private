@@ -129,7 +129,7 @@ def is_pole(v):
     return valence != 4
 
 
-def sort_edges_into_loops(edges, stop_at_poles=True):
+def sort_edges_into_loops(edges, stop_at_poles=True, stop_at_turns=True):
     """Sort marked edges into loops, following the mesh topology.
 
     At each vertex the walk continues through the OPPOSITE edge - the marked
@@ -146,6 +146,11 @@ def sort_edges_into_loops(edges, stop_at_poles=True):
     the clean loops between its poles and corners instead of paths that
     wander through them, and a plane's border becomes four straight open
     loops rather than one ring that even spacing would round off.
+
+    With stop_at_turns a loop only ever passes a regular four-edge crossing
+    straight through, via the opposite edge; where the marked edges bend
+    around the crossing instead, the loop ends there and the bend starts a
+    new one - an L-shaped selection is two loops, not one with a corner.
 
     Returns loops as [[vertex indices], is_circular], like
     get_connected_selections.
@@ -173,6 +178,9 @@ def sort_edges_into_loops(edges, stop_at_poles=True):
         if opposite:
             pool = opposite
         elif len(candidates) == 1:
+            if stop_at_turns and v.link_faces and len(v.link_edges) == 4:
+                # a bend at a regular crossing: the loop doesn't turn corners
+                return None
             pool = candidates
         else:
             return None
@@ -250,7 +258,9 @@ def get_attribute_elements(
         # fully assigned grid splits into its parallel loops instead of
         # zigzag paths
         loops = sort_edges_into_loops(
-            draw_elements, stop_at_poles=getattr(constraint, "stop_at_poles", True)
+            draw_elements,
+            stop_at_poles=getattr(constraint, "stop_at_poles", True),
+            stop_at_turns=getattr(constraint, "stop_at_turns", True),
         )
 
     elif domain == "FACE":
