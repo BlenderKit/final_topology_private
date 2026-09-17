@@ -58,13 +58,12 @@ free_moved = max((bm.verts[i].co - co).length for i, co in before_free.items())
 note(pin_moved < 1e-9, f"pinned verts frozen ({pin_moved:.2e})")
 note(free_moved > 1e-3, f"free verts still solved ({free_moved:.4f})")
 
-print("\n=== 2. pin overlay markers drawn ===")
-P.enable_draw_constraints = True
+print("\n=== 2. pin overlay markers queued even with constraint overlays off ===")
+P.enable_draw_constraints = False
 mod.draw.clear_draw_list()
 bpy.ops.mesh.final_topology_optimization_step("EXEC_DEFAULT", iterations=1)
 note(len(mod.draw.draw_pins) == len(pinned),
      f"one red square per pinned vert ({len(mod.draw.draw_pins)} for {len(pinned)})")
-P.enable_draw_constraints = False
 
 print("\n=== 3. pinned verts resist inverse subdivision snapping ===")
 for o in list(bpy.data.objects): bpy.data.objects.remove(o)

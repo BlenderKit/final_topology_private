@@ -193,17 +193,42 @@ def add_face(bm_face, object, col):
 
 def draw_callback_px_2d(self, context):
     """
-    Draw text in the 3D Viewport.
+    Pixel-space overlays in the 3D Viewport: the pinned vertices, as little
+    red squares of a fixed screen size like the UV editor's pins. Drawn as
+    projected quads rather than GPU points - the point primitive ignores its
+    size on Metal and shrinks to an invisible speck. Pins show whenever the
+    modal runs, whatever the active constraint and the overlay preference.
     """
-    # this is to avoid spamming console after errors
-    global draw_lines
+    if bpy.context.mode != "EDIT_MESH" or not draw_pins:
+        return
+    region = context.region
+    rv3d = context.region_data
+    if region is None or rv3d is None:
+        return
 
-    font_id = 0  # XXX, need to find out how best to get this.
-
-    # draw some text
-    # blf.position(font_id, 15, 30, 0)
-    # blf.size(font_id, 20, 72)
-    # blf.draw(font_id, "Inverse-subdivide activated ")
+    half = 4.0
+    coords = []
+    for co in draw_pins:
+        p = bpy_extras.view3d_utils.location_3d_to_region_2d(region, rv3d, Vector(co))
+        if p is None:
+            continue
+        x, y = p.x, p.y
+        coords += [
+            (x - half, y - half), (x + half, y - half), (x + half, y + half),
+            (x - half, y - half), (x + half, y + half), (x - half, y + half),
+        ]
+    if not coords:
+        return
+    if bpy.app.version < (4, 0, 0):
+        shader = gpu.shader.from_builtin("2D_UNIFORM_COLOR")
+    else:
+        shader = gpu.shader.from_builtin("UNIFORM_COLOR")
+    gpu.state.blend_set("ALPHA")
+    batch = batch_for_shader(shader, "TRIS", {"pos": coords})
+    shader.uniform_float("color", (1.0, 0.12, 0.12, 0.95))
+    shader.bind()
+    batch.draw(shader)
+    gpu.state.blend_set("NONE")
 
 
 def draw_callback_px_3d(self, context):
@@ -280,14 +305,6 @@ def draw_callback_px_3d(self, context):
                 {"pos": draw_colored_lines_pos, "color": draw_colored_lines_col},
             )
             batch.draw(smooth_shader)
-
-    if draw_pins and user_preferences.enable_draw_constraints:
-        gpu.state.point_size_set(7.0)
-        batch = batch_for_shader(shader, "POINTS", {"pos": draw_pins})
-        shader.uniform_float("color", (1.0, 0.12, 0.12, 0.95))
-        shader.bind()
-        batch.draw(shader)
-        gpu.state.point_size_set(1.0)
 
     for col, points in draw_points.items():
         for point in points:

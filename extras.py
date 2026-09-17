@@ -2636,8 +2636,9 @@ def evaluate_constraints(object, bmesh_edit=None, bmesh_eval=None, inverse_subdi
             for v in bmesh_edit.verts:
                 if v[layer] == 1.0:
                     pinned_verts.add(v.index)
-                    if user_preferences.enable_draw_constraints:
-                        draw.add_pin(object.matrix_world @ v.co)
+                    # pins always show while running, they matter for
+                    # reading what every other constraint is doing
+                    draw.add_pin(object.matrix_world @ v.co)
 
     # remember which vertices sit on a mirror seam before anything moves
     mirror_data = []
