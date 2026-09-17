@@ -4262,9 +4262,12 @@ def add_selection_to_attribute(
             name=attribute_name, type="FLOAT", domain=domain
         )
     attribute.data.foreach_set("value", values)
+    # read the name before going back to edit mode - the mode switch
+    # rebuilds the mesh data and leaves the attribute reference dangling
+    attribute_name = attribute.name
 
     bpy.ops.object.mode_set(mode="EDIT")
-    return attribute.name
+    return attribute_name
 
 
 def fill_attribute_with_selection(
@@ -4288,9 +4291,12 @@ def fill_attribute_with_selection(
             name=attribute_name, type="FLOAT", domain=domain
         )
     attribute.data.foreach_set("value", values)
+    # read the name before going back to edit mode - the mode switch
+    # rebuilds the mesh data and leaves the attribute reference dangling
+    attribute_name = attribute.name
 
     bpy.ops.object.mode_set(mode="EDIT")
-    return attribute.name
+    return attribute_name
 
 
 class MoveConstraintOperator(bpy.types.Operator):

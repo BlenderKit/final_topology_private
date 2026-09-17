@@ -9,7 +9,8 @@
 # The installed addon must be the PRO variant (extras.py present), since the
 # constraints live there.
 
-BLENDER="${BLENDER:-/Applications/Blender5.0.app/Contents/MacOS/Blender}"
+# default: the main Blender.app; override with BLENDER=/path/to/binary
+BLENDER="${BLENDER:-/Applications/Blender.app/Contents/MacOS/Blender}"
 DIR="$(cd "$(dirname "$0")" && pwd)"
 pattern="${1:-test_*.py}"
 
