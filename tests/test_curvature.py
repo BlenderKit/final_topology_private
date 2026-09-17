@@ -18,6 +18,7 @@ end = src.index("def evaluate_constraints")
 exec(compile(src[start:end], "extras_slice", "exec"), ns)
 curvature_loop_samples = ns["curvature_loop_samples"]
 curvature_calculate = ns["curvature_calculate"]
+segment_curvature_targets = ns["segment_curvature_targets"]
 
 class FakeVert:
     def __init__(self, co, normal, index):
@@ -105,6 +106,120 @@ for _ in range(80):
 after = linear_residual(open_loop)
 print(f"{'PASS' if after < before else 'FAIL'}  LINEAR reduces residual: {before:.4f} -> {after:.4f}")
 if after >= before: fails.append("linear open")
+
+# --- SEGMENTS mode: same-turn bows keep their own curvature ---
+def s_curve(noise=0.0, count_a=14, count_b=12):
+    """Arc of radius 1 turning left, then tangentially an arc of radius 0.6
+    turning right - an S. Normals are the consistent left-normals of the
+    tangent, so the signed curvature flips at the inflection."""
+    pts = []
+    for i in range(count_a):
+        a = -math.pi * 0.45 + math.pi * 0.9 * i / (count_a - 1)
+        pts.append((math.sin(a), 1.0 - math.cos(a)))
+    top = pts[-1]
+    # the second arc's center sits on the tangent's normal at the join
+    a_end = math.pi * 0.45
+    tangent = (math.cos(a_end), math.sin(a_end))
+    center = (top[0] + 0.6 * -(-tangent[1]), top[1] + 0.6 * -(tangent[0]))
+    start = math.atan2(top[1] - center[1], top[0] - center[0])
+    for i in range(1, count_b):
+        a = start - math.pi * 0.8 * i / (count_b - 1)
+        pts.append((center[0] + 0.6 * math.cos(a), center[1] + 0.6 * math.sin(a)))
+    verts = []
+    for i, (x, y) in enumerate(pts):
+        verts.append(FakeVert((x, y, 0.0), (0, 0, 1), i))
+    refresh_normals(verts)
+    if noise:
+        for i, v in enumerate(verts):
+            v.co += v.normal * noise * math.sin(i * 2.7)
+        refresh_normals(verts)
+    return [verts, False], count_a
+
+def refresh_normals(verts):
+    for i, v in enumerate(verts):
+        p = verts[max(i - 1, 0)].co; q = verts[min(i + 1, len(verts) - 1)].co
+        t = (q - p).normalized()
+        v.normal = Vector((-t.y, t.x, 0.0))
+
+loop, count_a = s_curve()
+samples = curvature_loop_samples(loop[0], False)
+weights = [(s["h1"] + s["h2"]) * 0.5 for s in samples]
+targets = segment_curvature_targets(samples, weights, False)
+distinct = sorted({round(t, 3) for t in targets})
+print(f"{'PASS' if len(distinct) == 2 else 'FAIL'}  S-curve splits into two segments: targets {distinct}")
+if len(distinct) != 2: fails.append("segment count")
+mags = sorted(abs(t) for t in distinct)
+ok = distinct[0] < 0 < distinct[1] and 0.8 < mags[0] < 1.2 and 1.4 < mags[1] < 1.9
+print(f"{'PASS' if ok else 'FAIL'}  the two bows keep opposite signs and their own radii (|k| ~1 and ~1.67)")
+if not ok: fails.append("segment signs")
+
+def bow_means(loop, count_a):
+    samples = curvature_loop_samples(loop[0], loop[1])
+    a = [s["k"] for s in samples if s["index"] < count_a - 1]
+    b = [s["k"] for s in samples if s["index"] > count_a - 1]
+    return sum(a) / len(a), sum(b) / len(b)
+def bow_spread(loop, count_a):
+    samples = curvature_loop_samples(loop[0], loop[1])
+    a = [s["k"] for s in samples if s["index"] < count_a - 1]
+    b = [s["k"] for s in samples if s["index"] > count_a - 1]
+    return max(max(a) - min(a), max(b) - min(b))
+
+noisy, count_a = s_curve(noise=0.004)
+spread0 = bow_spread(noisy, count_a)
+for _ in range(120):
+    offs = curvature_calculate([noisy], mode="SEGMENTS")
+    for v in noisy[0]:
+        if v.index in offs: v.co += offs[v.index] * 0.3
+    refresh_normals(noisy[0])
+spread1 = bow_spread(noisy, count_a)
+ma, mb = bow_means(noisy, count_a)
+print(f"{'PASS' if spread1 < spread0 * 0.35 else 'FAIL'}  SEGMENTS evens each bow: spread {spread0:.3f} -> {spread1:.3f}")
+if spread1 >= spread0 * 0.35: fails.append("segments even")
+ok = ma * mb < 0 and 0.6 < abs(ma) < 1.3 and 1.2 < abs(mb) < 2.1
+print(f"{'PASS' if ok else 'FAIL'}  SEGMENTS keeps the S: bow means {ma:.2f} / {mb:.2f}")
+if not ok: fails.append("segments keep S")
+
+# CONSTANT on the same S pulls both bows toward one shared value
+flat, count_a = s_curve(noise=0.004)
+for _ in range(120):
+    offs = curvature_calculate([flat], mode="CONSTANT")
+    for v in flat[0]:
+        if v.index in offs: v.co += offs[v.index] * 0.3
+    refresh_normals(flat[0])
+ca, cb = bow_means(flat, count_a)
+ok = abs(ca - cb) < abs(ma - mb) * 0.5
+print(f"{'PASS' if ok else 'FAIL'}  CONSTANT merges the bows instead: {ca:.2f} / {cb:.2f}")
+if not ok: fails.append("constant merges")
+
+# closed loop with a dent: the seam sits in the convex part, the two convex
+# runs must join across it into one segment
+def ring_with_dent(first, last, depth):
+    ring = circle_loop(1.0, 32)
+    for i in range(first, last + 1):
+        ring[0][i].co *= 1.0 - depth * math.sin(math.pi * (i - first) / (last - first))
+    for i in range(32):
+        p = ring[0][(i - 1) % 32].co; q = ring[0][(i + 1) % 32].co
+        t = (q - p).normalized()
+        ring[0][i].normal = Vector((t.y, -t.x, 0.0))  # outward for a ccw circle
+    return ring
+def segment_count(loop):
+    samples = curvature_loop_samples(loop[0], loop[1])
+    weights = [(s["h1"] + s["h2"]) * 0.5 for s in samples]
+    return len({round(t, 3) for t in segment_curvature_targets(samples, weights, loop[1])})
+# a deep dent is a concave bow of its own; the convex rest joins across the
+# seam (a shallow dent stays convex all the way and would be one segment)
+n_seg = segment_count(ring_with_dent(10, 22, 0.5))
+print(f"{'PASS' if n_seg == 2 else 'FAIL'}  dented ring: convex runs join across the seam, dent separate ({n_seg} segments)")
+if n_seg != 2: fails.append("ring seam merge")
+# a single vertex pushed in far enough to turn the other way defines a
+# turn of its own - one vertex is enough in subdivision modelling
+n_seg = segment_count(ring_with_dent(12, 14, 0.04))
+print(f"{'PASS' if n_seg == 2 else 'FAIL'}  a single reversed vertex is its own segment ({n_seg} segments)")
+if n_seg != 2: fails.append("single vertex turn")
+# a shallow nudge that keeps bending the same way does not split
+n_seg = segment_count(ring_with_dent(12, 14, 0.005))
+print(f"{'PASS' if n_seg == 1 else 'FAIL'}  a same-direction nudge does not split ({n_seg} segments)")
+if n_seg != 1: fails.append("same direction nudge")
 
 print("\n" + ("ALL PASSED" if not fails else f"FAILURES: {fails}"))
 sys.exit(1 if fails else 0)

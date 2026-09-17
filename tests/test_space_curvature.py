@@ -128,4 +128,52 @@ note(worst_y < 1e-5, f"wire loop stays in its plane (max |y| {worst_y:.2e})")
 k1 = curvature_spread()
 note(k1 < k0 * 0.25, f"curvature evens out along the loop (spread {k0:.3f} -> {k1:.3f})")
 
+print("\n=== 4. same-turn mode runs on a real loop ===")
+c = ob.data.ft_custom_constraints[0]
+c.curvature_mode = "SEGMENTS"
+note(c.curvature_mode == "SEGMENTS", "mode accepted")
+r = bpy.ops.mesh.final_topology_optimization_step("EXEC_DEFAULT", iterations=30)
+bm = bmesh.from_edit_mesh(me); bm.verts.ensure_lookup_table(); _KEEP.append(bm)
+note(r == {'FINISHED'} and max(abs(v.co.y) for v in bm.verts) < 1e-5,
+     f"step runs and the loop stays planar ({r})")
+
+print("\n=== 5. one batch of steps equals the same steps taken one at a time ===")
+# vertex normals must track the moving loop inside a batch, otherwise a
+# batch and a stepwise run (fresh normals each call) diverge - which showed
+# up as constraints re-solving whenever a selection change refreshed normals
+def curved_ring_setup():
+    for o in list(bpy.data.objects): bpy.data.objects.remove(o)
+    bpy.ops.mesh.primitive_uv_sphere_add(segments=16, ring_count=12, radius=1.0)
+    ob = bpy.context.active_object
+    ob.modifiers.new("Subdivision", "SUBSURF").levels = 1
+    bpy.ops.object.mode_set(mode="EDIT")
+    bpy.context.tool_settings.mesh_select_mode = (False, True, False)
+    bm = bmesh.from_edit_mesh(ob.data); bm.verts.ensure_lookup_table(); _KEEP.append(bm)
+    ring = [v for v in bm.verts if abs(v.co.z) < 1e-4]
+    ring.sort(key=lambda v: math.atan2(v.co.y, v.co.x))
+    ridx = [v.index for v in ring]
+    for k, i in enumerate(ridx):
+        bm.verts[i].co.z += 0.12 * math.sin(k * 1.3)  # a wavy ring, turns both ways
+    for v in bm.verts: v.select = False
+    for e in bm.edges: e.select = False
+    for e in bm.edges:
+        if e.verts[0].index in set(ridx) and e.verts[1].index in set(ridx):
+            e.select = True; e.verts[0].select = True; e.verts[1].select = True
+    bmesh.update_edit_mesh(ob.data)
+    bpy.ops.object.final_topology_add_constraint("EXEC_DEFAULT", constraint_type="CURVATURE", name="Cv")
+    ob.data.ft_custom_constraints[0].curvature_mode = "SEGMENTS"
+    return ob, ridx
+ob, ridx = curved_ring_setup()
+bpy.ops.mesh.final_topology_optimization_step("EXEC_DEFAULT", iterations=40)
+bm = bmesh.from_edit_mesh(ob.data); bm.verts.ensure_lookup_table(); _KEEP.append(bm)
+batch = [bm.verts[i].co.copy() for i in ridx]
+ob, ridx = curved_ring_setup()
+for _ in range(40):
+    bpy.ops.mesh.final_topology_optimization_step("EXEC_DEFAULT", iterations=1)
+    bm = bmesh.from_edit_mesh(ob.data); bm.normal_update(); _KEEP.append(bm)
+bm = bmesh.from_edit_mesh(ob.data); bm.verts.ensure_lookup_table(); _KEEP.append(bm)
+stepwise = [bm.verts[i].co.copy() for i in ridx]
+diff = max((a - b).length for a, b in zip(batch, stepwise))
+note(diff < 1e-5, f"batch and stepwise runs agree (max difference {diff:.2e})")
+
 print("\n" + ("ALL PASSED" if not fails else f"FAILURES: {fails}"))

@@ -1638,6 +1638,66 @@ def fit_linear_curvature(samples, weights):
     return [a + b * s["t"] for s in samples]
 
 
+def segment_curvature_targets(samples, weights, is_circular):
+    """One target curvature per same-turn segment of the loop.
+
+    The loop splits wherever the signed curvature of a vertex flips sign -
+    the turn direction crosses 180 degrees there. Each run of vertices
+    bending the same way gets the weighted mean curvature of that run, so
+    an S-curve keeps both of its bows as arcs instead of being averaged
+    toward one straight-ish curvature.
+
+    The turn is read from every single vertex, no smoothing: in subdivision
+    modelling one vertex can define the turn the modeller wants, and a
+    one-vertex run simply keeps its own curvature. Only a curvature far
+    below float noise counts as neutral and stays with the run it's in, so
+    an exactly straight stretch doesn't split on rounding.
+    """
+    n = len(samples)
+    ks = [s["k"] for s in samples]
+    sum_w = sum(weights)
+    mean_abs = sum(w * abs(k) for w, k in zip(weights, ks)) / sum_w
+    threshold = 0.01 * mean_abs
+
+    def strong_sign(k):
+        if k > threshold:
+            return 1
+        if k < -threshold:
+            return -1
+        return 0
+
+    runs = []  # [sign, [sample positions]]
+    for i in range(n):
+        sign = strong_sign(ks[i])
+        if runs and (sign == 0 or sign == runs[-1][0]):
+            runs[-1][1].append(i)
+        elif runs and runs[-1][0] == 0:
+            # the run so far was neutral, it takes on the first strong sign
+            runs[-1][0] = sign
+            runs[-1][1].append(i)
+        else:
+            runs.append([sign, [i]])
+
+    if is_circular and len(runs) > 1 and (
+        runs[0][0] == runs[-1][0] or runs[0][0] == 0 or runs[-1][0] == 0
+    ):
+        # the seam sits inside one bow - join the two runs across it
+        runs[0][1] = runs[-1][1] + runs[0][1]
+        if runs[0][0] == 0:
+            runs[0][0] = runs[-1][0]
+        runs.pop()
+
+    targets = [0.0] * n
+    for sign, run in runs:
+        run_w = sum(weights[i] for i in run)
+        if run_w < 1e-12:
+            continue
+        average = sum(weights[i] * ks[i] for i in run) / run_w
+        for i in run:
+            targets[i] = average
+    return targets
+
+
 def curvature_calculate(
     loops_data,
     mode="CONSTANT",
@@ -1650,7 +1710,9 @@ def curvature_calculate(
     Args:
         loops_data: List of loops, each as [verts_list, is_circular]
         mode: 'CONSTANT' for one curvature along the loop (an arc),
-              'LINEAR' for a curvature that changes at a constant rate.
+              'LINEAR' for a curvature that changes at a constant rate,
+              'SEGMENTS' for one curvature per same-turn segment - the loop
+              splits where its turn direction flips.
         measure: 'LENGTH' evens out the true curvature, 'ANGLE' evens out the
             turn angle per vertex regardless of segment lengths.
         movable_ranges: optional list of (start, end) index ranges per loop.
@@ -1688,6 +1750,8 @@ def curvature_calculate(
         # so circular loops always aim for a single curvature
         if mode == "LINEAR" and not is_circular and len(samples) >= 3:
             targets = fit_linear_curvature(samples, weights)
+        elif mode == "SEGMENTS":
+            targets = segment_curvature_targets(samples, weights, is_circular)
         else:
             average = sum(w * s["k"] for w, s in zip(weights, samples)) / sum_w
             targets = [average] * len(samples)
@@ -2504,6 +2568,13 @@ def evaluate_constraints(object, bmesh_edit=None, bmesh_eval=None, inverse_subdi
 
     # vertices held by pin constraints: they move only under the user's own
     # transforms, no constraint nor inverse subdivision may touch them
+    # every constraint that measures or moves along vertex normals needs
+    # them current: the bmesh keeps the normals from when the step started
+    # otherwise, for the whole batch of iterations, and Blender only refreshes
+    # them on its own mesh updates - a selection change would then visibly
+    # re-solve the constraints with fresh normals
+    bmesh_edit.normal_update()
+
     pinned_verts = set()
     for c in cs:
         if c.constraint_type == "PIN" and c.enabled:
@@ -3656,6 +3727,13 @@ class CustomConstraint(bpy.types.PropertyGroup):
                 "Let the curvature change at a constant rate along the loop."
                 "\nClosed loops fall back to constant curvature",
             ),
+            (
+                "SEGMENTS",
+                "Same Turn",
+                "One curvature per segment turning the same way - the loop"
+                "\nsplits wherever its turn direction flips, so an S-curve"
+                "\nkeeps both bows as arcs instead of averaging to one",
+            ),
         ],
         description="Curvature profile the loop is pushed towards",
         update=update_constraint_data,
@@ -3704,7 +3782,7 @@ class CustomConstraint(bpy.types.PropertyGroup):
     # Smooth constraint properties
     smooth_mode: bpy.props.EnumProperty(
         name="Mode",
-        default="BLEND",
+        default="CURVATURE",
         items=[
             (
                 "BLEND",

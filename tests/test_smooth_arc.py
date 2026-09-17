@@ -82,6 +82,8 @@ bpy.ops.object.final_topology_add_constraint("EXEC_DEFAULT", constraint_type="SM
 c = ob.data.ft_custom_constraints[0]
 note(c.constraint_type == "SMOOTH" and abs(c.smooth_factor - 0.5) < 1e-9,
      f"smooth constraint added (factor {c.smooth_factor})")
+note(c.smooth_mode == "CURVATURE", f"round is the default mode ({c.smooth_mode})")
+c.smooth_mode = "BLEND"
 r0 = roughness()
 bpy.ops.mesh.final_topology_optimization_step("EXEC_DEFAULT", iterations=30)
 r1 = roughness()
@@ -127,6 +129,7 @@ corner_cos = {i: bm.verts[i].co.copy() for i in corners}
 for v in bm.verts: v.select = True
 bmesh.update_edit_mesh(ob.data)
 bpy.ops.object.final_topology_add_constraint("EXEC_DEFAULT", constraint_type="SMOOTH", name="Sm")
+ob.data.ft_custom_constraints[0].smooth_mode = "BLEND"
 bpy.ops.mesh.final_topology_optimization_step("EXEC_DEFAULT", iterations=40)
 bm = bmesh.from_edit_mesh(ob.data); bm.verts.ensure_lookup_table(); _KEEP.append(bm)
 inward = max(1.0 - max(abs(bm.verts[i].co.x), abs(bm.verts[i].co.y)) for i in border)
@@ -158,6 +161,7 @@ jag0 = wire_jag()
 for v in bm.verts: v.select = True
 bmesh.update_edit_mesh(me)
 bpy.ops.object.final_topology_add_constraint("EXEC_DEFAULT", constraint_type="SMOOTH", name="Sm")
+me.ft_custom_constraints[0].smooth_mode = "BLEND"
 bpy.ops.mesh.final_topology_optimization_step("EXEC_DEFAULT", iterations=60)
 bm = bmesh.from_edit_mesh(me); bm.verts.ensure_lookup_table(); _KEEP.append(bm)
 e_moved = max((bm.verts[0].co - end_cos[0]).length, (bm.verts[11].co - end_cos[1]).length)
@@ -212,7 +216,7 @@ def bump_height(ob, bump):
     bm = bmesh.from_edit_mesh(ob.data); bm.verts.ensure_lookup_table(); _KEEP.append(bm)
     return max(bm.verts[i].co.z for i in bump)
 ob, bump = bump_grid()
-note(ob.data.ft_custom_constraints[0].smooth_mode == "BLEND", "blend is the default mode")
+ob.data.ft_custom_constraints[0].smooth_mode = "BLEND"
 h0 = bump_height(ob, bump)
 bpy.ops.mesh.final_topology_optimization_step("EXEC_DEFAULT", iterations=200)
 h_blend = bump_height(ob, bump)
