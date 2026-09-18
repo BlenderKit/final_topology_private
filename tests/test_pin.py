@@ -94,7 +94,7 @@ r1 = sum(v.co.length for v in free) / len(free)
 note(hold_moved < 1e-9, f"pinned verts resist snapping ({hold_moved:.2e})")
 note(r1 > r0 + 0.01, f"free verts snap toward the target sphere ({r0:.4f} -> {r1:.4f})")
 
-print("\n=== 4. pin selection toggle (Shift+P operator) ===")
+print("\n=== 4. pin / unpin selection (Shift+P, Alt+P operators) ===")
 obj, ridx = ring_setup()
 mesh = obj.data
 def pin_marks():
@@ -107,8 +107,15 @@ def pin_marks():
             marked |= {v.index for v in bm.verts if v[layer] == 1.0}
     return marked
 def select_only(ids):
+    # a consistent vertex selection, as the UI would leave it: edges and
+    # faces follow the verts, otherwise the operator's object-mode round
+    # trip flushes stale face flags back down and selects everything
+    bpy.context.tool_settings.mesh_select_mode = (True, False, False)
     bm = bmesh.from_edit_mesh(mesh); bm.verts.ensure_lookup_table(); _KEEP.append(bm)
+    for f in bm.faces: f.select = False
+    for e in bm.edges: e.select = False
     for v in bm.verts: v.select = v.index in ids
+    bm.select_flush(True)
     bmesh.update_edit_mesh(mesh)
 # no pin constraint yet: the toggle creates one from the selection
 first = set(ridx[:3])
@@ -124,9 +131,23 @@ bpy.ops.object.final_topology_pin_selection("EXEC_DEFAULT")
 pins = [c for c in mesh.ft_custom_constraints if c.constraint_type == "PIN"]
 note(len(pins) == 1, "no duplicate pin constraint created")
 note(pin_marks() == first | second, f"selection added to the existing pin ({len(pin_marks())} verts)")
-# fully pinned selection: the same operator unpins it
+# fully pinned selection: Shift+P never unpins, it just keeps the pins
 select_only(second)
-bpy.ops.object.final_topology_pin_selection("EXEC_DEFAULT")
-note(pin_marks() == first - second, f"already-pinned selection gets unpinned ({sorted(pin_marks())})")
+r = bpy.ops.object.final_topology_pin_selection("EXEC_DEFAULT")
+note(pin_marks() == first | second, f"already-pinned selection stays pinned under Shift+P ({sorted(pin_marks())})")
+# explicit unpin (Alt+P) frees it
+bpy.ops.object.final_topology_pin_selection("EXEC_DEFAULT", unpin=True)
+note(pin_marks() == first - second, f"Alt+P unpins the selection ({sorted(pin_marks())})")
+# explicit unpin (Alt+P): a mixed selection only loses its pinned members,
+# nothing gets pinned, and unpinning verts that aren't pinned is a no-op
+remaining = pin_marks()
+mixed = set(list(remaining)[:1]) | set(ridx[8:10])
+select_only(mixed)
+r = bpy.ops.object.final_topology_pin_selection("EXEC_DEFAULT", unpin=True)
+note(r == {'FINISHED'} and pin_marks() == remaining - mixed and not (pin_marks() & mixed),
+     f"Alt+P unpins only the pinned part of a mixed selection ({sorted(pin_marks())})")
+select_only(set(ridx[8:10]))
+r = bpy.ops.object.final_topology_pin_selection("EXEC_DEFAULT", unpin=True)
+note(r == {'CANCELLED'} and pin_marks() == remaining - mixed, "Alt+P on unpinned verts changes nothing")
 
 print("\n" + ("ALL PASSED" if not fails else f"FAILURES: {fails}"))

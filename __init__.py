@@ -194,6 +194,13 @@ class InverseSubdivideAddonPreferences(AddonPreferences):
         description="Drawing of constraints.\n\n"
         "Selected constraint gets highlighted and selected.\n",
     )
+    select_active_constraint: BoolProperty(
+        name="Select Active Constraint",
+        default=True,
+        description="Clicking a constraint in the list selects the elements"
+        "\nassigned to it, switching to their select mode. Off keeps the"
+        "\ncurrent selection when changing the active constraint",
+    )
     overlays_alpha: FloatProperty(
         name="Overlays Alpha",
         default=0.5,
@@ -581,8 +588,13 @@ def register():
         alt=True,
     )
     addon_keymapitems.append(kmi)
+    print("SHORTCUTS REGISTERED")
+
+
     if has_extras:
-        # toggle pinning of the selected vertices (PRO constraints only)
+        extras.register()
+        # the pin shortcuts set operator properties, so they come after the
+        # operators exist
         kmi = km.keymap_items.new(
             "object.final_topology_pin_selection",
             type="P",
@@ -592,11 +604,28 @@ def register():
             alt=False,
         )
         addon_keymapitems.append(kmi)
-    print("SHORTCUTS REGISTERED")
-
-
-    if has_extras:
-        extras.register()
+        # Alt+P unpins, as in the UV editor
+        kmi = km.keymap_items.new(
+            "object.final_topology_pin_selection",
+            type="P",
+            value="PRESS",
+            ctrl=False,
+            shift=False,
+            alt=True,
+        )
+        kmi.properties.unpin = True
+        addon_keymapitems.append(kmi)
+        # Alt+C: add the selection to any constraint, or to a new one
+        kmi = km.keymap_items.new(
+            "wm.call_menu",
+            type="C",
+            value="PRESS",
+            ctrl=False,
+            shift=False,
+            alt=True,
+        )
+        kmi.properties.name = "FT_MT_constraint_quick"
+        addon_keymapitems.append(kmi)
 
 def unregister():
     # Remove classes

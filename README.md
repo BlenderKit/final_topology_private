@@ -30,10 +30,11 @@ Everything from the Artists edition, plus the constraint system: edit mode const
 - **Line** - straightens open loops onto the line between their ends, or onto stored fixed lines. Projected mode and even distribution.
 - **Circle** - pulls loops onto their best-fit circles, or onto stored fixed circles; open loops land on arcs. Even distribution, projected mode, and Join Center / Join Normal for concentric or coaxial rings.
 - **Curve** - snaps loops onto a curve object with true bezier evaluation, in 3D or projected onto the curve plane, optionally evenly distributed.
-- **Space** - spaces vertices along loops evenly or with a Same Ratio progression, sliding along arc, cubic or linear interpolation of the loop shape.
-- **Curvature** - evens out the curvature along loops, measured by arc length or turn angle, aiming for a constant or linearly changing profile, optionally sampling the loop's surroundings.
+- **Space** - spaces vertices along loops evenly, with a Same Ratio progression or by local Blur (settles around pinned vertices), sliding along arc, cubic or linear interpolation of the loop shape. Ring Width mode evens out the widths of edge rings instead, e.g. support loops.
+- **Curvature** - evens out the curvature along loops, measured by arc length or turn angle, aiming for a blurred, constant or linearly changing profile, optionally sampling the loop's surroundings. Direction picks the in/out bending against the surface, the turning on the surface, or both as separate curvatures.
 - **Thickness** - keeps the wall thickness under the vertices within minimum/maximum bounds, measured by rays cast against the mesh itself. Colored face overlay shows too thin, fine and too thick areas.
-- **Pin** - freezes vertices against all constraints and inverse subdivision; only your own transforms move them. Shift+P toggles pinning of the current selection.
+- **Pin** - freezes vertices against all constraints and inverse subdivision; only your own transforms move them. Shift+P pins the current selection, Alt+P unpins it.
+- **Alt+C** opens a quick menu that adds the current selection to any existing constraint, or to a new one from the New Mesh Constraint submenu, without activating the constraint first. The Select Active Constraint checkbox under the list controls whether clicking a constraint selects its elements.
 - **Smooth** - smooths the selected area without shrinking it, respecting mesh borders and sharp feature corners.
 - **Slide optimize** - slides edges along a loop so that the edge straightens or the angles on both sides of a vertex get equalized.
 - **Inclination limit** - limits face inclination against a chosen axis, for manufacturing purposes.

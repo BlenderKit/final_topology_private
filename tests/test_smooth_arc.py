@@ -35,6 +35,7 @@ for e in bm.edges: e.select = True
 bmesh.update_edit_mesh(me)
 bpy.ops.object.final_topology_add_constraint("EXEC_DEFAULT", constraint_type="SPACE", name="S")
 c = ob.data.ft_custom_constraints[0]
+c.space_method = "EVEN"   # global even spacing, the local Blur default settles more slowly
 note(c.space_interpolation == "arc", "arc is the default")
 bpy.ops.mesh.final_topology_optimization_step("EXEC_DEFAULT", iterations=100)
 bm = bmesh.from_edit_mesh(ob.data); bm.verts.ensure_lookup_table(); _KEEP.append(bm)

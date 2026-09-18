@@ -647,6 +647,21 @@ def space_calculate(loops_data, interpolation="arc", method="EVEN", step_weight=
         tpoints = None
         if method == "RATIO" and not is_circular:
             tpoints = ratio_spaced_tpoints(tknots, len_total)
+        elif method == "BLUR":
+            # every vertex aims halfway between its neighbours - local evening
+            # that settles around pinned or otherwise held vertices instead
+            # of fighting for one global spacing
+            count = len(verts)
+            tpoints = list(tknots)
+            for i in range(count):
+                if is_circular:
+                    before = tknots[i - 1] - (len_total if i == 0 else 0.0)
+                    after = tknots[(i + 1) % count] + (len_total if i == count - 1 else 0.0)
+                elif 0 < i < count - 1:
+                    before, after = tknots[i - 1], tknots[i + 1]
+                else:
+                    continue
+                tpoints[i] = 0.5 * (before + after)
         if tpoints is None:
             t_per_segment = len_total / segments
             tpoints = [i * t_per_segment for i in range(len(verts))]
@@ -676,6 +691,89 @@ def space_calculate(loops_data, interpolation="arc", method="EVEN", step_weight=
                 target_offsets, offset_counts, v.index, (new_pos - v.co) / step_weight
             )
 
+    return finish_loop_offsets(target_offsets, offset_counts)
+
+
+def sort_edges_into_rings(edges):
+    """Sort marked edges into edge rings - runs of parallel edges, each the
+    opposite edge of the previous one across a quad. Returns lists of
+    (edges, is_circular) in ring order."""
+    marked = set(edges)
+
+    def across(edge):
+        result = []
+        for face in edge.link_faces:
+            if len(face.verts) != 4:
+                continue
+            for other in face.edges:
+                if other is edge or other not in marked:
+                    continue
+                if not (set(other.verts) & set(edge.verts)):
+                    result.append(other)
+        return result
+
+    used = set()
+    rings = []
+    for start in edges:
+        if start in used:
+            continue
+        used.add(start)
+        chain = [start]
+        circular = False
+        for reverse in (False, True):
+            current = start
+            while True:
+                nexts = [e for e in across(current) if e not in used]
+                if not nexts:
+                    if not reverse and start in across(current) and len(chain) > 2:
+                        circular = True
+                    break
+                current = nexts[0]
+                used.add(current)
+                if reverse:
+                    chain.insert(0, current)
+                else:
+                    chain.append(current)
+            if circular:
+                break
+        rings.append((chain, circular))
+    return rings
+
+
+def ring_width_calculate(edges, method="EVEN"):
+    """Even out the widths of edge rings: the lengths of the parallel edges
+    crossing a loop band. Each rung's ends move apart or together along the
+    rung by half the difference to its target - the mean width of the ring
+    (EVEN, RATIO), or the mean of its own and its neighbours' widths (BLUR),
+    which settles locally around held vertices.
+
+    Returns a dictionary mapping vertex indices to offset vectors."""
+    target_offsets = {}
+    offset_counts = {}
+    for ring, circular in sort_edges_into_rings(edges):
+        lengths = [e.calc_length() for e in ring]
+        if len(ring) < 2 or sum(lengths) < 1e-12:
+            continue
+        count = len(ring)
+        if method == "BLUR":
+            targets = []
+            for i in range(count):
+                if circular:
+                    neighbours = [lengths[i - 1], lengths[i], lengths[(i + 1) % count]]
+                else:
+                    neighbours = lengths[max(0, i - 1):i + 2]
+                targets.append(sum(neighbours) / len(neighbours))
+        else:
+            mean = sum(lengths) / count
+            targets = [mean] * count
+        for edge, length, target in zip(ring, lengths, targets):
+            if length < 1e-12:
+                continue
+            a, b = edge.verts
+            along = (b.co - a.co) / length
+            half = (target - length) * 0.5
+            add_loop_offset(target_offsets, offset_counts, a.index, -along * half)
+            add_loop_offset(target_offsets, offset_counts, b.index, along * half)
     return finish_loop_offsets(target_offsets, offset_counts)
 
 
@@ -1535,14 +1633,16 @@ def inclination_limit_calculate(
     return target_offsets
 
 
-def curvature_loop_samples(verts, is_circular, measure="LENGTH", reference="NORMAL"):
+def curvature_loop_samples(verts, is_circular, measure="LENGTH", direction="OUT"):
     """Measure curvature at every vertex of a loop that has one on both sides.
 
-    reference 'NORMAL' projects the bending onto the vertex normal: only the
-    in/out bending against the surface counts, sideways turning within the
-    surface is ignored. reference 'LOOP' takes the full bending of the loop
-    as a space curve, whichever way it turns, signed by the side of the
-    normal it bends toward - sideways turns then count as curvature too.
+    direction 'OUT' measures the bending in and out of the surface: the turn
+    around the axis that lies in the surface, perpendicular to the loop's
+    travel, between the two edges - the dihedral angle of the two edges seen
+    along that axis. direction 'TURN' measures the turn around the surface
+    normal: how the loop bends sideways on the surface. Each sample carries
+    the axis along which a vertex must move to change that curvature - the
+    normal for OUT, the in-surface side direction for TURN.
 
     measure 'LENGTH' uses the arc length parametrization, so both the parameter
     and the second derivative are built from the real edge lengths - the
@@ -1600,24 +1700,39 @@ def curvature_loop_samples(verts, is_circular, measure="LENGTH", reference="NORM
             continue
         normal.normalize()
 
+        d1 = (co - prev_co) / h1
+        d2 = (next_co - co) / h2
+        # the loop's travel direction and, in the surface, the side axis
+        # perpendicular to it - the shared edge of the two triangles the
+        # user would measure the in/out angle between
+        travel = d1 + d2
+        if travel.length_squared < 1e-12:
+            travel = d1
+        side = normal.cross(travel)
+        if side.length_squared < 1e-12:
+            continue
+        side.normalize()
+        # the hinge the angle turns around, and the two edge directions seen
+        # in the plane perpendicular to it
+        hinge = normal if direction == "TURN" else side
+        p1 = d1 - hinge * d1.dot(hinge)
+        p2 = d2 - hinge * d2.dot(hinge)
+        angle = atan2(p1.cross(p2).dot(hinge), p1.dot(p2))
         if measure == "ANGLE":
-            # turn between the incoming and outgoing direction along the normal,
-            # segment lengths deliberately don't enter - vertex density then
-            # decides how tightly the shape may turn
-            d1 = (co - prev_co) / h1
-            d2 = (next_co - co) / h2
-            bending = d2 - d1
+            # the dihedral angle of the two edges around the hinge - segment
+            # lengths deliberately don't enter, vertex density then decides
+            # how tightly the shape may turn
+            k = angle
         else:
-            # second derivative on an unevenly spaced grid
+            # second derivative on an unevenly spaced grid, exact on circles,
+            # projected on the component's turning plane
             bending = (
                 prev_co * h2 - co * (h1 + h2) + next_co * h1
             ) * (2.0 / (h1 * h2 * (h1 + h2)))
-        along_normal = -bending.dot(normal)
-        if reference == "LOOP":
-            # the whole bend, signed by which side of the normal it leans to
-            k = bending.length if along_normal >= 0 else -bending.length
-        else:
-            k = along_normal
+            k = bending.dot(side) if direction == "TURN" else -bending.dot(normal)
+        # moving the vertex along the axis raises the curvature: outward
+        # along the normal for OUT, against the side for TURN
+        axis = -side if direction == "TURN" else normal
 
         samples.append(
             {
@@ -1627,6 +1742,11 @@ def curvature_loop_samples(verts, is_circular, measure="LENGTH", reference="NORM
                 "h1": h1,
                 "h2": h2,
                 "normal": normal,
+                "axis": axis,
+                "hinge": hinge,
+                "angle": angle,
+                "p1": p1,
+                "p2": p2,
             }
         )
     return samples
@@ -1735,6 +1855,74 @@ def profile_targets(samples, weights, mode, is_circular, blur_radius=1):
     return [average] * len(samples)
 
 
+class _BridgeVert:
+    """A virtual vertex continuing a loop beyond a pole; never moved."""
+
+    __slots__ = ("co", "normal", "index", "link_faces")
+
+    def __init__(self, co, normal):
+        self.co = co
+        self.normal = normal
+        self.index = None
+        self.link_faces = True
+
+
+def bridge_loop_through_poles(verts, is_circular, min_alignment=0.3):
+    """Extend an open loop past the poles it ends on.
+
+    Prolonging the last edge through the pole, the pole's other edges that
+    lean along that prolongation - the two straddling it on a 3- or 5-pole,
+    the opposite one at a regular vertex - point at where the loop would
+    have continued. Their far ends average into a virtual vertex beyond the
+    pole, so the pole gets a curvature sample of its own and moves with the
+    loop instead of anchoring it. Every loop ending on that pole bridges
+    the same way, so their curvature fields meet there.
+
+    Returns (extended verts, number of virtual verts prepended).
+    """
+    if is_circular or len(verts) < 2:
+        return verts, 0
+
+    def virtual_beyond(pole, previous):
+        if not getattr(pole, "link_edges", None) or not utils.is_pole(pole):
+            return None
+        ahead = (pole.co - previous.co)
+        if ahead.length_squared < 1e-18:
+            return None
+        ahead.normalize()
+        candidates = []
+        for edge in pole.link_edges:
+            other = edge.other_vert(pole)
+            if other is previous:
+                continue
+            direction = other.co - pole.co
+            if direction.length_squared < 1e-18:
+                continue
+            alignment = ahead.dot(direction.normalized())
+            if alignment > min_alignment:
+                candidates.append((alignment, other))
+        if not candidates:
+            return None
+        candidates.sort(key=lambda c: -c[0])
+        chosen = [other for _, other in candidates[:2]]
+        co = sum((o.co for o in chosen), Vector((0.0, 0.0, 0.0))) / len(chosen)
+        normal = sum((o.normal for o in chosen), Vector((0.0, 0.0, 0.0)))
+        if normal.length_squared < 1e-12:
+            normal = pole.normal.copy()
+        return _BridgeVert(co, normal.normalized())
+
+    extended = list(verts)
+    prepended = 0
+    start = virtual_beyond(verts[0], verts[1])
+    if start is not None:
+        extended.insert(0, start)
+        prepended = 1
+    end = virtual_beyond(verts[-1], verts[-2])
+    if end is not None:
+        extended.append(end)
+    return extended, prepended
+
+
 def curvature_calculate(
     loops_data,
     mode="CONSTANT",
@@ -1743,7 +1931,8 @@ def curvature_calculate(
     movable_ranges=None,
     split_turns=False,
     blur_radius=1,
-    reference="NORMAL",
+    direction="OUT",
+    bridge_poles=False,
 ):
     """Push vertices along their normals so the loop keeps an even curvature.
 
@@ -1774,66 +1963,136 @@ def curvature_calculate(
     for loop_index, loop_data in enumerate(loops_data):
         verts = loop_data[0]
         is_circular = loop_data[1]
+        prepended = 0
+        if bridge_poles:
+            verts, prepended = bridge_loop_through_poles(verts, is_circular)
         if len(verts) < 3:
             continue
-
-        samples = curvature_loop_samples(verts, is_circular, measure, reference)
-        if len(samples) < 2:
-            continue
-
-        if measure == "ANGLE":
-            # the angle is a per-vertex quantity, every vertex counts the same
-            weights = [1.0] * len(samples)
-        else:
-            # each sample stands for the half edge on both of its sides
-            weights = [(s["h1"] + s["h2"]) * 0.5 for s in samples]
-        sum_w = sum(weights)
-        if sum_w < 1e-9:
-            continue
-
-        if split_turns:
-            # every same-turn segment gets the profile on its own; a segment
-            # is an open stretch even on a closed loop, unless it's the
-            # whole loop
-            targets = [0.0] * len(samples)
-            runs = same_turn_runs(samples, weights, is_circular)
-            for run in runs:
-                run_circular = is_circular and len(runs) == 1
-                run_targets = profile_targets(
-                    [samples[i] for i in run], [weights[i] for i in run],
-                    mode, run_circular, blur_radius,
-                )
-                for i, target in zip(run, run_targets):
-                    targets[i] = target
-        else:
-            targets = profile_targets(samples, weights, mode, is_circular, blur_radius)
 
         movable = None
         if movable_ranges is not None:
             movable = movable_ranges[loop_index]
+            if prepended:
+                movable = (movable[0] + prepended, movable[1] + prepended)
 
-        for s, target in zip(samples, targets):
-            if movable is not None and not (movable[0] <= s["index"] < movable[1]):
-                continue
-            if measure == "ANGLE":
-                # moving a vertex by d along its normal changes its angle
-                # by d * (h1+h2) / (h1*h2), invert that to hit the target
-                offset = (target - s["k"]) * s["h1"] * s["h2"] / (s["h1"] + s["h2"])
-            else:
-                # moving a vertex by d along its normal changes its curvature
-                # by d * 2 / (h1*h2), so invert that to hit the target curvature
-                offset = (target - s["k"]) * s["h1"] * s["h2"] * 0.5
-            # keep a single step from overshooting into a neighbour
-            limit = max_offset_ratio * min(s["h1"], s["h2"])
-            offset = max(-limit, min(limit, offset))
-            add_loop_offset(
-                target_offsets,
-                offset_counts,
-                verts[s["index"]].index,
-                s["normal"] * offset,
-            )
+        # BOTH evens the in/out bending and the on-surface turning as two
+        # separate fields, each moved along its own axis - a sharp turn on
+        # the surface never turns into a bump and vice versa
+        directions = ("OUT", "TURN") if direction == "BOTH" else (direction,)
+        loop_offsets = {}
+        for component in directions:
+            for index, offset in curvature_component_offsets(
+                verts, is_circular, measure, component, mode, split_turns,
+                blur_radius, movable, max_offset_ratio,
+            ).items():
+                loop_offsets[index] = loop_offsets.get(index, Vector((0.0, 0.0, 0.0))) + offset
+        for index, offset in loop_offsets.items():
+            add_loop_offset(target_offsets, offset_counts, index, offset)
 
     return finish_loop_offsets(target_offsets, offset_counts)
+
+
+def curvature_component_offsets(
+    verts, is_circular, measure, direction, mode, split_turns, blur_radius,
+    movable, max_offset_ratio,
+):
+    """Offsets (vertex index -> vector) evening one curvature component of
+    one loop, along that component's axis."""
+    offsets = {}
+    samples = curvature_loop_samples(verts, is_circular, measure, direction)
+    if len(samples) < 2:
+        return offsets
+
+    if measure == "ANGLE":
+        # the angle is a per-vertex quantity, every vertex counts the same
+        weights = [1.0] * len(samples)
+    else:
+        # each sample stands for the half edge on both of its sides
+        weights = [(s["h1"] + s["h2"]) * 0.5 for s in samples]
+    sum_w = sum(weights)
+    if sum_w < 1e-9:
+        return offsets
+
+    if split_turns:
+        # every same-turn segment gets the profile on its own; a segment
+        # is an open stretch even on a closed loop, unless it's the
+        # whole loop
+        targets = [0.0] * len(samples)
+        runs = same_turn_runs(samples, weights, is_circular)
+        for run in runs:
+            run_circular = is_circular and len(runs) == 1
+            run_targets = profile_targets(
+                [samples[i] for i in run], [weights[i] for i in run],
+                mode, run_circular, blur_radius,
+            )
+            for i, target in zip(run, run_targets):
+                targets[i] = target
+    else:
+        targets = profile_targets(samples, weights, mode, is_circular, blur_radius)
+
+    for s, target in zip(samples, targets):
+        if movable is not None and not (movable[0] <= s["index"] < movable[1]):
+            continue
+        if measure == "ANGLE":
+            # moving a vertex by d along its normal changes its angle
+            # by d * (h1+h2) / (h1*h2), invert that to hit the target
+            offset = (target - s["k"]) * s["h1"] * s["h2"] / (s["h1"] + s["h2"])
+        else:
+            # moving a vertex by d along its normal changes its curvature
+            # by d * 2 / (h1*h2), so invert that to hit the target curvature
+            offset = (target - s["k"]) * s["h1"] * s["h2"] * 0.5
+        # keep a single step from overshooting into a neighbour
+        limit = max_offset_ratio * min(s["h1"], s["h2"])
+        offset = max(-limit, min(limit, offset))
+        move = s["axis"] * offset
+        if direction == "TURN":
+            i = s["index"]
+            move = slide_across_loop(
+                verts[i], verts[i - 1], verts[(i + 1) % len(verts)], move, max_offset_ratio
+            )
+        offsets[verts[s["index"]].index] = move
+
+    return offsets
+
+
+def slide_across_loop(vert, prev_vert, next_vert, move, max_ratio):
+    """Turn a sideways move of a loop vertex into a slide along the mesh edge
+    leaving the loop on that side, the way Slide Optimize moves vertices.
+
+    The vertex then stays on the surface the edge spans, keeping the in/out
+    shape, and the slide is capped at max_ratio of that edge per step so the
+    vertex can never pass the neighbouring loop - even when another
+    constraint, e.g. a narrow Ring Width, holds that loop close by. Without
+    an edge on that side (a border) the move is only capped by the shortest
+    crossing edge; vertices without mesh edges keep the plain move.
+    """
+    link_edges = getattr(vert, "link_edges", None)
+    if not link_edges or move.length_squared < 1e-24:
+        return move
+    length = move.length
+    direction = move / length
+    skip = {prev_vert.index, next_vert.index}
+    best = None
+    best_dot = 0.5
+    best_length = 0.0
+    shortest = None
+    for edge in link_edges:
+        other = edge.other_vert(vert)
+        if other.index in skip:
+            continue
+        along = other.co - vert.co
+        edge_length = along.length
+        if edge_length < 1e-9:
+            continue
+        shortest = edge_length if shortest is None else min(shortest, edge_length)
+        dot = along.dot(direction) / edge_length
+        if dot > best_dot:
+            best, best_dot, best_length = along / edge_length, dot, edge_length
+    if best is not None:
+        return best * min(length * best_dot, max_ratio * best_length)
+    if shortest is not None and length > max_ratio * shortest:
+        return direction * (max_ratio * shortest)
+    return move
 
 
 def walk_loop_continuation(prev_vert, end_vert, max_steps, forbidden):
@@ -2578,6 +2837,58 @@ def smooth_verts_calculate(verts, factor=0.5, mode="BLEND"):
     return offsets
 
 
+CURVATURE_ANGLE_COLORS = {
+    "OUT": (0.1, 0.9, 1.0),
+    "TURN": (1.0, 0.85, 0.1),
+}
+
+
+def draw_curvature_angles(loops_data, direction, matrix, alpha=0.9):
+    """Little arcs at every vertex showing the angle the curvature constraint
+    measures there - between the continued incoming edge and the outgoing
+    edge, seen around the hinge: the in-surface axis for In/Out (cyan), the
+    normal for On Surface (yellow). A short bar through the vertex shows the
+    hinge itself, a faint leg the continued incoming edge.
+    """
+    directions = ("OUT", "TURN") if direction == "BOTH" else (direction,)
+    for loop_data in loops_data:
+        verts = loop_data[0]
+        if len(verts) < 3:
+            continue
+        for component in directions:
+            rgb = CURVATURE_ANGLE_COLORS[component]
+            strong = (rgb[0], rgb[1], rgb[2], alpha)
+            faint = (rgb[0], rgb[1], rgb[2], alpha * 0.35)
+            for s in curvature_loop_samples(verts, loop_data[1], "ANGLE", component):
+                angle = s["angle"]
+                if abs(angle) < radians(0.2):
+                    continue
+                co = verts[s["index"]].co
+                radius = 0.35 * min(s["h1"], s["h2"])
+                p1 = s["p1"]
+                p2 = s["p2"]
+                if p1.length_squared < 1e-12 or p2.length_squared < 1e-12:
+                    continue
+                p1 = p1.normalized()
+                hinge = s["hinge"]
+                # the hinge as a bar across the vertex
+                draw.add_colored_line(
+                    (matrix @ (co - hinge * radius * 0.5), matrix @ (co + hinge * radius * 0.5)),
+                    (faint, faint),
+                )
+                # the continued incoming edge, the arc starts on it
+                draw.add_colored_line((matrix @ co, matrix @ (co + p1 * radius)), (faint, faint))
+                steps = max(3, int(abs(angle) / radians(12)) + 1)
+                previous = co + p1 * radius
+                for step in range(1, steps + 1):
+                    rot = Matrix.Rotation(angle * step / steps, 3, hinge)
+                    point = co + (rot @ p1) * radius
+                    draw.add_colored_line((matrix @ previous, matrix @ point), (strong, strong))
+                    previous = point
+                # the leg on the outgoing edge closes the wedge
+                draw.add_colored_line((matrix @ co, matrix @ previous), (strong, strong))
+
+
 def draw_loop_deviation(loops_data, target_offsets, matrix, alpha):
     """Gradient along the loops showing how far each vertex still is from
     satisfying the constraint - green settled, through yellow to red.
@@ -2957,18 +3268,30 @@ def evaluate_constraints(object, bmesh_edit=None, bmesh_eval=None, inverse_subdi
                 movable_ranges=movable_ranges,
                 split_turns=c.curvature_split_turns,
                 blur_radius=c.curvature_blur_radius,
-                reference=c.curvature_reference,
+                direction=c.curvature_direction,
+                bridge_poles=c.curvature_bridge_poles,
             )
+            if (
+                user_preferences.enable_draw_constraints
+                and cs[object.data.ft_custom_constraints_index] == c
+            ):
+                draw_curvature_angles(loops_for_eval, c.curvature_direction, object.matrix_world)
 
         # evaluate space constraint
         elif c.constraint_type == "SPACE":
-            # SPACE handles multi-loop format
-            target_offsets = space_calculate(
-                constraint_verts_loops,
-                interpolation=c.space_interpolation,
-                method=c.space_method,
-                step_weight=user_preferences.step_weight,
-            )
+            if c.space_target == "RING":
+                ring_edges = utils.get_attribute_elements(
+                    object, bmesh_edit, c, domain="EDGE", as_domain="EDGE"
+                )
+                target_offsets = ring_width_calculate(ring_edges, method=c.space_method)
+            else:
+                # SPACE handles multi-loop format
+                target_offsets = space_calculate(
+                    constraint_verts_loops,
+                    interpolation=c.space_interpolation,
+                    method=c.space_method,
+                    step_weight=user_preferences.step_weight,
+                )
 
         # pinned vertices receive no offsets from anything
         if pinned_verts:
@@ -3069,9 +3392,16 @@ class FunTopologyDecimateOperator(bpy.types.Operator):
         context.window_manager.event_timer_remove(self.timer)
 
 
+_keep_selection_on_activate = False
+
+
 def update_constraint_index(self, context):
-    if _restoring_undo:
-        # don't touch the selection while undo puts the list back
+    if _restoring_undo or _keep_selection_on_activate:
+        # don't touch the selection while undo puts the list back, nor when
+        # the quick menu just added the selection to a constraint
+        return
+    user_preferences = bpy.context.preferences.addons[__package__].preferences
+    if not getattr(user_preferences, "select_active_constraint", True):
         return
     # select constraint vertices
     constraints = context.object.data.ft_custom_constraints
@@ -3765,10 +4095,34 @@ class CustomConstraint(bpy.types.PropertyGroup):
 
 
     # Space constraint properties
+    space_target: bpy.props.EnumProperty(
+        name="Space",
+        default="LOOP",
+        items=[
+            ("LOOP", "Along Loop", "Distribute the vertices along the assigned loops"),
+            (
+                "RING",
+                "Ring Width",
+                "Even out the widths of the assigned edge rings - the lengths"
+                "\nof the parallel edges crossing a band, e.g. a support loop's"
+                "\nwidth. Assign the crossing edges (an edge ring selection)",
+            ),
+        ],
+        description="What gets evened out",
+        update=update_constraint_data,
+    )
     space_method: bpy.props.EnumProperty(
         name="Spacing",
-        default="EVEN",
+        default="BLUR",
         items=[
+            (
+                "BLUR",
+                "Blur",
+                "Each vertex settles halfway between its neighbours - spacing"
+                "\nevens out locally and comes to rest around pinned or"
+                "\notherwise held vertices instead of fighting for one"
+                "\nglobal spacing",
+            ),
             ("EVEN", "Even", "Distribute vertices at equal distances along the loop"),
             (
                 "RATIO",
@@ -3826,24 +4180,39 @@ class CustomConstraint(bpy.types.PropertyGroup):
         description="Curvature profile the loop is pushed towards",
         update=update_constraint_data,
     )
-    curvature_reference: bpy.props.EnumProperty(
-        name="Reference",
-        default="NORMAL",
+    curvature_bridge_poles: bpy.props.BoolProperty(
+        name="Bridge Poles",
+        default=True,
+        description="Where a loop ends on a pole, continue it virtually through"
+        "\nthe pole along its best-aligned edges, so the pole vertex takes"
+        "\npart in the curvature instead of anchoring the loop - the loops"
+        "\nmeeting at the pole share it and their curvature runs through",
+        update=update_constraint_data,
+    )
+    curvature_direction: bpy.props.EnumProperty(
+        name="Direction",
+        default="OUT",
         items=[
             (
-                "NORMAL",
-                "Surface Normal",
-                "Measure only the bending against the surface normal - a"
-                "\nloop turning sideways within the surface has no curvature",
+                "OUT",
+                "In / Out",
+                "Even out the bending in and out of the surface - the turn"
+                "\naround the in-surface axis between the two edges",
             ),
             (
-                "LOOP",
-                "Loop",
-                "Measure the full bending of the loop as a space curve,"
-                "\nsideways turns included, signed by the side of the normal",
+                "TURN",
+                "On Surface",
+                "Even out the turning on the surface - the turn around the"
+                "\nsurface normal, corrected by sliding sideways",
+            ),
+            (
+                "BOTH",
+                "Both",
+                "Both, as two separate curvatures: a sharp turn on the surface"
+                "\nnever becomes a bump and a bump never becomes a turn",
             ),
         ],
-        description="What the loop's bending is measured against",
+        description="Which bending of the loop gets evened out",
         update=update_constraint_data,
     )
     curvature_blur_radius: bpy.props.IntProperty(
@@ -4125,6 +4494,10 @@ class VIEW3D_PT_final_topology_constraints(Panel):
                 "object.final_topology_remove_selection_from_all",
                 text="From All",
             )
+        layout.prop(
+            bpy.context.preferences.addons[__package__].preferences,
+            "select_active_constraint",
+        )
 
         if len(mesh.ft_custom_constraints) > 0:
             ac = mesh.ft_custom_constraints[mesh.ft_custom_constraints_index]
@@ -4162,16 +4535,20 @@ class VIEW3D_PT_final_topology_constraints(Panel):
                 layout.prop(ac, "even_distribution")
             
             if ac.constraint_type == "SPACE":
+                labeled_enum_row(layout, ac, "space_target")
                 labeled_enum_row(layout, ac, "space_method")
-                labeled_enum_row(layout, ac, "space_interpolation")
+                if ac.space_target == "LOOP":
+                    labeled_enum_row(layout, ac, "space_interpolation")
 
             if ac.constraint_type == "CURVATURE":
                 labeled_enum_row(layout, ac, "curvature_mode")
                 if ac.curvature_mode == "BLUR":
                     layout.prop(ac, "curvature_blur_radius")
                 labeled_enum_row(layout, ac, "curvature_measure")
-                labeled_enum_row(layout, ac, "curvature_reference")
-                layout.prop(ac, "curvature_split_turns")
+                labeled_enum_row(layout, ac, "curvature_direction")
+                row = layout.row()
+                row.prop(ac, "curvature_split_turns")
+                row.prop(ac, "curvature_bridge_poles")
                 layout.prop(ac, "curvature_context_steps")
 
             if ac.constraint_type == "LINE":
@@ -4430,10 +4807,16 @@ class PinSelectionOperator(bpy.types.Operator):
     bl_label = "Pin Selection"
     bl_description = (
         "\n\nPin the selected vertices - adds them to the active or first pin"
-        "\nconstraint, creating one when none exists. When the whole selection"
-        "\nis already pinned, unpins it from all pin constraints instead"
+        "\nconstraint, creating one when none exists (Shift+P)."
+        "\nWith Unpin (Alt+P) removes them from every pin constraint instead"
     )
     bl_options = {"REGISTER", "UNDO"}
+
+    unpin: bpy.props.BoolProperty(
+        name="Unpin",
+        default=False,
+        description="Only remove the selected vertices from every pin constraint",
+    )
 
     @classmethod
     def poll(cls, context):
@@ -4462,8 +4845,12 @@ class PinSelectionOperator(bpy.types.Operator):
 
         record_constraint_undo_state(mesh)
 
-        if pins and selected <= pinned:
-            # the whole selection is pinned already - toggle it free again
+        if self.unpin:
+            # Alt+P, as in the UV editor - Shift+P never unpins, a toggle
+            # that silently flipped on an already pinned selection was
+            # too easy to mistake for the shortcut not working
+            if not pins or not (selected & pinned):
+                return {"CANCELLED"}
             _suppress_undo_push = True
             try:
                 for c in pins:
@@ -4524,22 +4911,52 @@ class AddSelectionToConstraintOperator(bpy.types.Operator):
     bl_options = {"REGISTER", "UNDO"}
 
     remove: bpy.props.BoolProperty(name="Remove", default=False)
+    index: bpy.props.IntProperty(
+        name="Constraint",
+        default=-1,
+        description="Which constraint to add to, -1 for the active one",
+        options={"SKIP_SAVE"},
+    )
+
+    @classmethod
+    def poll(cls, context):
+        ob = context.active_object
+        return ob is not None and ob.type == "MESH" and ob.mode == "EDIT"
 
     def execute(self, context):
-        global _suppress_undo_push
-        record_constraint_undo_state(context.active_object.data)
+        global _suppress_undo_push, _keep_selection_on_activate
+        mesh = context.active_object.data
+        constraints = mesh.ft_custom_constraints
+        index = self.index if self.index >= 0 else mesh.ft_custom_constraints_index
+        if not (0 <= index < len(constraints)):
+            self.report({"ERROR"}, "No such constraint")
+            return {"CANCELLED"}
+        record_constraint_undo_state(mesh)
         _suppress_undo_push = True
         try:
-            # Access the mesh data block
-            mesh = context.active_object.data
             bm = bmesh.from_edit_mesh(mesh)
-            constraint = mesh.ft_custom_constraints[mesh.ft_custom_constraints_index]
+            constraint = constraints[index]
             attribute_name = constraint.attribute_name
             domain = get_constraint_domain_type(constraint.constraint_type)
-            attribute_name = add_selection_to_attribute(
-                attribute_name, mesh, remove=self.remove, domain=domain
-            )
+            layers = {"POINT": bm.verts, "EDGE": bm.edges, "FACE": bm.faces}[domain].layers.float
+            if attribute_name and layers.get(attribute_name) is not None:
+                attribute_name = add_selection_to_attribute(
+                    attribute_name, mesh, remove=self.remove, domain=domain
+                )
+            elif not self.remove:
+                # a constraint that lost its attribute gets a fresh one
+                attribute_name = fill_attribute_with_selection(
+                    "ft_constraint", mesh, domain=domain, new=True
+                )
             constraint.attribute_name = attribute_name
+            if index != mesh.ft_custom_constraints_index:
+                # show the constraint the selection went to, but keep the
+                # selection - that is the point of picking it from the menu
+                _keep_selection_on_activate = True
+                try:
+                    mesh.ft_custom_constraints_index = index
+                finally:
+                    _keep_selection_on_activate = False
         finally:
             _suppress_undo_push = False
         push_constraint_undo(
@@ -5041,6 +5458,77 @@ class DeleteConstraintOperator(bpy.types.Operator):
         return {"FINISHED"}
 
 
+CONSTRAINT_TYPE_ICONS = {
+    "PLANE": "MESH_PLANE",
+    "PLANE_FIXED": "MESH_PLANE",
+    "CURVE": "CURVE_DATA",
+    "CIRCLE": "MESH_CIRCLE",
+    "CIRCLE_FIXED": "MESH_CIRCLE",
+    "INVERSE_SUBDIVIDE": "MOD_SUBSURF",
+    "INCLINATION_LIMIT": "ORIENTATION_GLOBAL",
+    "SLIDE_OPTIMIZE": "DRIVER_ROTATIONAL_DIFFERENCE",
+    "SPACE": "TRACKING_FORWARDS_SINGLE",
+    "CURVATURE": "SPHERECURVE",
+    "LINE": "IPO_LINEAR",
+    "LINE_FIXED": "IPO_LINEAR",
+    "THICKNESS": "MOD_SOLIDIFY",
+    "PIN": "PINNED",
+    "SMOOTH": "MOD_SMOOTH",
+}
+
+
+def constraint_type_icon(constraint_type):
+    return CONSTRAINT_TYPE_ICONS.get(constraint_type, "CONSTRAINT")
+
+
+class FT_MT_new_constraint(bpy.types.Menu):
+    bl_idname = "FT_MT_new_constraint"
+    bl_label = "New Mesh Constraint"
+
+    def draw(self, context):
+        layout = self.layout
+        layout.operator_context = "EXEC_DEFAULT"
+        items = bpy.ops.object.final_topology_add_constraint.get_rna_type().properties["constraint_type"].enum_items
+        for item in items:
+            op = layout.operator(
+                "object.final_topology_add_constraint",
+                text=item.name,
+                icon=constraint_type_icon(item.identifier),
+            )
+            op.constraint_type = item.identifier
+            op.name = item.name
+
+
+class FT_MT_constraint_quick(bpy.types.Menu):
+    """Alt+C: add the selection to an existing constraint without making it
+    active first - which would replace the selection - or to a new one."""
+
+    bl_idname = "FT_MT_constraint_quick"
+    bl_label = "Add Selection to Constraint"
+
+    @classmethod
+    def poll(cls, context):
+        ob = context.active_object
+        return ob is not None and ob.type == "MESH" and ob.mode == "EDIT"
+
+    def draw(self, context):
+        layout = self.layout
+        layout.operator_context = "EXEC_DEFAULT"
+        mesh = context.active_object.data
+        constraints = mesh.ft_custom_constraints
+        for index, c in enumerate(constraints):
+            op = layout.operator(
+                "object.final_topology_add_selection_to_constraint",
+                text=c.name,
+                icon=constraint_type_icon(c.constraint_type),
+            )
+            op.index = index
+            op.remove = False
+        if len(constraints) > 0:
+            layout.separator()
+        layout.menu("FT_MT_new_constraint", icon="ADD")
+
+
 class CUSTOM_UL_constraint_list(bpy.types.UIList):
     def draw_item(
         self, context, layout, data, item, icon, active_data, active_propname, index
@@ -5051,30 +5539,7 @@ class CUSTOM_UL_constraint_list(bpy.types.UIList):
         # Use layout to display the constraint properties
         # layout.label(text=constraint.name)
 
-        if constraint.constraint_type == "PLANE":
-            icon = "MESH_PLANE"
-        elif constraint.constraint_type == "CURVE":
-            icon = "CURVE_DATA"
-        elif constraint.constraint_type == "CIRCLE":
-            icon = "MESH_CIRCLE"
-        elif constraint.constraint_type == "INVERSE_SUBDIVIDE":
-            icon = "MOD_SUBSURF"
-        elif constraint.constraint_type == "INCLINATION_LIMIT":
-            icon = "ORIENTATION_GLOBAL"
-        elif constraint.constraint_type == "SLIDE_OPTIMIZE":
-            icon = "DRIVER_ROTATIONAL_DIFFERENCE"
-        elif constraint.constraint_type == "SPACE":
-            icon = "TRACKING_FORWARDS_SINGLE"
-        elif constraint.constraint_type == "CURVATURE":
-            icon = "SPHERECURVE"
-        elif constraint.constraint_type == "LINE":
-            icon = "IPO_LINEAR"
-        elif constraint.constraint_type == "THICKNESS":
-            icon = "MOD_SOLIDIFY"
-        elif constraint.constraint_type == "PIN":
-            icon = "PINNED"
-        elif constraint.constraint_type == "SMOOTH":
-            icon = "MOD_SMOOTH"
+        icon = constraint_type_icon(constraint.constraint_type)
 
         layout.prop(constraint, "name", text="", emboss=False, icon=icon)
         
@@ -5988,6 +6453,8 @@ classes = [
     CurveFromSelectionOperator,
     DeleteConstraintOperator,
     CUSTOM_UL_constraint_list,
+    FT_MT_new_constraint,
+    FT_MT_constraint_quick,
     VIEW3D_PT_final_topology_constraints,
     VIEW3D_PT_final_topology_extra_operators,
     gizmos.FTPointHandleGizmo,

@@ -8,7 +8,13 @@ from mathutils import Vector
 
 SRC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "extras.py")
 src = open(SRC).read()
-ns = {"Vector": Vector}
+import types
+class _FakeDraw:
+    def __init__(self): self.lines = []
+    def add_colored_line(self, coords, colors): self.lines.append((tuple(map(Vector, coords)), colors))
+fake_draw = _FakeDraw()
+from mathutils import Matrix
+ns = {"Vector": Vector, "Matrix": Matrix, "draw": fake_draw, "radians": math.radians, "atan2": math.atan2, "sqrt": math.sqrt, "pi": math.pi, "exp": math.exp, "cos": math.cos, "sin": math.sin}
 # the shared loop-offset helpers live earlier in the file
 h_start = src.index("def add_loop_offset")
 h_end = src.index("def space_calculate")
@@ -295,25 +301,152 @@ after = curvature_spread(ring)
 print(f"{'PASS' if after < before * 0.25 else 'FAIL'}  BLUR relaxes a dent: {before:.4f} -> {after:.4f}")
 if after >= before * 0.25: fails.append("blur dent")
 
-# --- reference: surface normal vs loop ---
-# a loop snaking sideways on a flat plane (normals all +Z): no bending against
-# the normal at all, but plenty of bending as a space curve
+# --- direction: in/out against the surface vs turning on the surface ---
+# a loop snaking sideways on a flat plane (normals all +Z): no bending in or
+# out of the surface at all, but plenty of turning on it
 snake = []
 for i in range(14):
     snake.append(FakeVert((i * 0.3, 0.25 * math.sin(i * 1.1), 0.0), (0, 0, 1), i))
-k_normal = [s["k"] for s in curvature_loop_samples(snake, False, reference="NORMAL")]
-k_loop = [s["k"] for s in curvature_loop_samples(snake, False, reference="LOOP")]
-ok = max(abs(k) for k in k_normal) < 1e-9 and max(abs(k) for k in k_loop) > 0.5
-print(f"{'PASS' if ok else 'FAIL'}  sideways snake: normal reference sees nothing ({max(abs(k) for k in k_normal):.1e}), loop reference sees the bends ({max(abs(k) for k in k_loop):.2f})")
-if not ok: fails.append("reference snake")
-# on a circle with radial normals both references agree exactly
+for measure in ("LENGTH", "ANGLE"):
+    k_out = [s["k"] for s in curvature_loop_samples(snake, False, measure, "OUT")]
+    k_turn = [s["k"] for s in curvature_loop_samples(snake, False, measure, "TURN")]
+    ok = max(abs(k) for k in k_out) < 1e-6 and max(abs(k) for k in k_turn) > 0.3
+    print(f"{'PASS' if ok else 'FAIL'}  sideways snake ({measure}): In/Out sees nothing ({max(abs(k) for k in k_out):.1e}), On Surface sees the bends ({max(abs(k) for k in k_turn):.2f})")
+    if not ok: fails.append(f"direction snake {measure}")
+# the sample's axis is the direction a vertex must move to raise its
+# curvature - checked numerically for both directions by nudging each vertex
+# along its axis and measuring again
+for direction, loop in (("TURN", snake), ("OUT", [FakeVert((i * 0.3, 0.0, 0.25 * math.sin(i * 1.1)), (0, 0, 1), i) for i in range(14)])):
+    ok = True
+    base = {s["index"]: s for s in curvature_loop_samples(loop, False, "LENGTH", direction)}
+    for i, s0 in base.items():
+        nudged = [FakeVert(v.co, v.normal, v.index) for v in loop]
+        nudged[i].co += s0["axis"] * 0.01
+        k1 = [s for s in curvature_loop_samples(nudged, False, "LENGTH", direction) if s["index"] == i][0]["k"]
+        if k1 <= s0["k"]:
+            ok = False
+    print(f"{'PASS' if ok else 'FAIL'}  {direction}: a nudge along the sample axis raises the curvature")
+    if not ok: fails.append(f"{direction} axis sign")
+# a bump on a straight row: pure In/Out, no turning; the dihedral angle at the
+# top of a symmetric bump is exactly twice the slope angle
+row = []
+for i in range(9):
+    z = 0.4 if i == 4 else 0.0
+    row.append(FakeVert((float(i), 0.0, z), (0, 0, 1), i))
+k_out = curvature_loop_samples(row, False, "ANGLE", "OUT")
+k_turn = curvature_loop_samples(row, False, "ANGLE", "TURN")
+top = [s for s in k_out if s["index"] == 4][0]
+expected = 2 * math.atan(0.4)
+ok = abs(top["k"] - expected) < 1e-6 and max(abs(s["k"]) for s in k_turn) < 1e-6
+print(f"{'PASS' if ok else 'FAIL'}  bump: In/Out dihedral angle {top['k']:.4f} (expect {expected:.4f}), On Surface {max(abs(s['k']) for s in k_turn):.1e}")
+if not ok: fails.append("bump dihedral")
+# a leaning normal (15 degrees sideways) tilts the in-surface axis, so the
+# dihedral seen around it shrinks a little - but far less than the old
+# projection onto the normal lost
+lean = math.radians(15)
+tilt = Vector((0.0, math.sin(lean), math.cos(lean)))
+row_t = [FakeVert(v.co, tilt, v.index) for v in row]
+top_t = [s for s in curvature_loop_samples(row_t, False, "ANGLE", "OUT") if s["index"] == 4][0]
+projected = 2 * (0.4 / math.hypot(1, 0.4)) * math.cos(lean)
+ok = top_t["k"] > projected and expected - top_t["k"] < 0.1 * expected
+print(f"{'PASS' if ok else 'FAIL'}  bump with a leaning normal: dihedral {top_t['k']:.4f} beats the normal projection {projected:.4f}, near the full {expected:.4f}")
+if not ok: fails.append("tilted dihedral")
+# on a circle with radial normals the in/out curvature is 1/r, the turn is zero
 ring = circle_loop(1.0, 32)
-kn = [s["k"] for s in curvature_loop_samples(ring[0], True, reference="NORMAL")]
-kl = [s["k"] for s in curvature_loop_samples(ring[0], True, reference="LOOP")]
-# mathutils vectors are float32, so "exactly radial" holds to ~1e-7
-ok = max(abs(a - b) for a, b in zip(kn, kl)) < 1e-5
-print(f"{'PASS' if ok else 'FAIL'}  circle: both references agree (1/r = {sum(kl)/len(kl):.4f})")
-if not ok: fails.append("reference circle")
+ko = [s["k"] for s in curvature_loop_samples(ring[0], True, "LENGTH", "OUT")]
+kt = [s["k"] for s in curvature_loop_samples(ring[0], True, "LENGTH", "TURN")]
+ok = abs(sum(ko) / len(ko) - 1.0) < 1e-3 and max(abs(k) for k in kt) < 1e-5
+print(f"{'PASS' if ok else 'FAIL'}  circle: In/Out 1/r = {sum(ko)/len(ko):.4f}, On Surface {max(abs(k) for k in kt):.1e}")
+if not ok: fails.append("direction circle")
+# BOTH on the snake: the offsets even the sideways turns and stay in the plane
+offs = curvature_calculate([(snake, False)], mode="CONSTANT", direction="BOTH")
+ok = offs and max(abs(o.z) for o in offs.values()) < 1e-9 and max(abs(o.y) for o in offs.values()) > 1e-4
+print(f"{'PASS' if ok else 'FAIL'}  BOTH on the flat snake moves only within the plane")
+if not ok: fails.append("both snake")
+# and on a ring with the turn evened per direction, the two fields don't
+# leak into each other: a sideways wobble on the circle produces no in/out move
+wob = circle_loop(1.0, 32)[0]
+for i, v in enumerate(wob):
+    a = math.atan2(v.co.y, v.co.x)
+    v.normal = Vector((0, 0, 1))
+    v.co.x, v.co.y = math.cos(a) * (1 + 0.05 * math.sin(4 * a)), math.sin(a) * (1 + 0.05 * math.sin(4 * a))
+offs = curvature_calculate([(wob, True)], mode="CONSTANT", direction="BOTH")
+ok = offs and max(abs(o.z) for o in offs.values()) < 1e-9
+print(f"{'PASS' if ok else 'FAIL'}  wobbly ring with +Z normals: BOTH leaves Z alone")
+if not ok: fails.append("both ring")
+
+# --- On Surface slides along the crossing edge, capped by its length ---
+slide_across_loop = ns["slide_across_loop"]
+class FakeEdge:
+    def __init__(self, a, b): self.a, self.b = a, b
+    def other_vert(self, v): return self.b if v is self.a else self.a
+class LinkedVert(FakeVert):
+    def __init__(self, co, index):
+        super().__init__(co, (0, 0, 1), index); self.link_edges = []
+def link(a, b):
+    e = FakeEdge(a, b); a.link_edges.append(e); b.link_edges.append(e); return e
+prev_v, mid, next_v = LinkedVert((-5, 0, 0), 0), LinkedVert((0, 0, 0), 1), LinkedVert((5, 0, 0), 2)
+across = LinkedVert((0.1, 0.5, 0.2), 3)     # a short, slightly skewed crossing edge, 0.5mm-ish
+away = LinkedVert((0, -4, 0), 4)
+for a, b in ((prev_v, mid), (mid, next_v), (mid, across), (mid, away)): link(a, b)
+big = Vector((0, 2.0, 0))                   # wants to move 2 units sideways, four times the edge
+moved = slide_across_loop(mid, prev_v, next_v, big, 0.3)
+edge_dir = (across.co - mid.co).normalized(); edge_len = (across.co - mid.co).length
+ok = abs(moved.length - 0.3 * edge_len) < 1e-6 and moved.normalized().dot(edge_dir) > 0.9999
+print(f"{'PASS' if ok else 'FAIL'}  big sideways move becomes a slide along the crossing edge, capped at 30% of it ({moved.length:.4f} of {edge_len:.4f})")
+if not ok: fails.append("slide cap")
+small = Vector((0, 0.05, 0))
+moved = slide_across_loop(mid, prev_v, next_v, small, 0.3)
+ok = abs(moved.length - small.dot(edge_dir)) < 1e-6 and moved.normalized().dot(edge_dir) > 0.9999
+print(f"{'PASS' if ok else 'FAIL'}  small move keeps its component along the edge ({moved.length:.4f})")
+if not ok: fails.append("slide small")
+moved = slide_across_loop(mid, prev_v, next_v, Vector((0, -2.0, 0)), 0.3)
+ok = moved.normalized().dot(Vector((0, -1, 0))) > 0.9999 and abs(moved.length - 0.3 * 4) < 1e-6
+print(f"{'PASS' if ok else 'FAIL'}  the other side uses its own edge ({moved.length:.3f} along -Y)")
+if not ok: fails.append("slide other side")
+# a border vertex with no edge on the wanted side: only capped by the shortest crossing edge
+border = LinkedVert((0, 0, 0), 5); bp, bn = LinkedVert((-5, 0, 0), 6), LinkedVert((5, 0, 0), 7); inward = LinkedVert((0, -0.5, 0), 8)
+for a, b in ((bp, border), (border, bn), (border, inward)): link(a, b)
+moved = slide_across_loop(border, bp, bn, Vector((0, 3.0, 0)), 0.3)
+ok = moved.normalized().dot(Vector((0, 1, 0))) > 0.9999 and abs(moved.length - 0.15) < 1e-6
+print(f"{'PASS' if ok else 'FAIL'}  border vertex: outward move capped by the shortest crossing edge ({moved.length:.3f})")
+if not ok: fails.append("slide border")
+# vertices without mesh edges (pure math loops) are left alone
+ok = (slide_across_loop(row[4], row[3], row[5], big, 0.3) - big).length < 1e-9
+print(f"{'PASS' if ok else 'FAIL'}  wire loop vertex keeps the plain move")
+if not ok: fails.append("slide wire")
+
+# --- the angle overlay: arcs sweep exactly the measured angle ---
+draw_curvature_angles = ns["draw_curvature_angles"]
+top = [s for s in curvature_loop_samples(row, False, "LENGTH", "OUT") if s["index"] == 4][0]
+ok = abs(top["angle"] - expected) < 1e-6 and top["p1"].length > 0 and top["p2"].length > 0
+print(f"{'PASS' if ok else 'FAIL'}  samples carry the measured angle also with the Arc Length measure ({top['angle']:.4f})")
+if not ok: fails.append("sample angle")
+fake_draw.lines.clear()
+draw_curvature_angles([(row, False)], "OUT", Matrix.Identity(4))
+co = row[4].co
+radius = 0.35 * min(top["h1"], top["h2"])
+# the wedge at the bump top: hinge bar, incoming leg, arc segments, outgoing leg
+near = [l for l in fake_draw.lines if all((c - co).length <= radius * 1.001 for c in l[0])]
+arc_end = None
+for (a, b), _ in near:
+    if (a - co).length < 1e-9 and abs((b - co).length - radius) < 1e-6 and (b - co).normalized().dot(top["p2"].normalized()) > 0.9999:
+        arc_end = b
+ok = arc_end is not None and len(near) >= 6
+print(f"{'PASS' if ok else 'FAIL'}  overlay wedge at the bump ends on the outgoing edge direction ({len(near)} segments)")
+if not ok: fails.append("overlay wedge")
+# the arc points all sit on the radius, and the hinge bar lies along the side axis
+on_radius = all(abs((b - co).length - radius) < 1e-5 for (a, b), (c1, c2) in near if c1[3] > 0.5 and (a - co).length > 1e-9)
+hinge_bars = [l for l in near if abs((l[0][0] - co).length - radius * 0.5) < 1e-6 and abs((l[0][1] - co).length - radius * 0.5) < 1e-6]
+ok = on_radius and len(hinge_bars) == 1 and abs((hinge_bars[0][0][1] - hinge_bars[0][0][0]).normalized().dot(Vector((0, 1, 0)))) > 0.9999
+print(f"{'PASS' if ok else 'FAIL'}  arc stays on its radius, hinge bar runs across the loop in the surface")
+if not ok: fails.append("overlay hinge")
+fake_draw.lines.clear()
+draw_curvature_angles([(snake, False)], "BOTH", Matrix.Identity(4))
+cols = {tuple(round(x, 2) for x in c[0][:3]) for _, c in fake_draw.lines}
+ok = (0.1, 0.9, 1.0) not in cols and (1.0, 0.85, 0.1) in cols
+print(f"{'PASS' if ok else 'FAIL'}  flat snake with Both: only On Surface (yellow) wedges drawn, In/Out has no angle to show")
+if not ok: fails.append("overlay both colors")
 
 print("\n" + ("ALL PASSED" if not fails else f"FAILURES: {fails}"))
 sys.exit(1 if fails else 0)
