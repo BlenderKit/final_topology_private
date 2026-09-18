@@ -112,4 +112,57 @@ run(60)
 match = min((ca - s).length for s, _ in stored) < 1e-3 and min((cb - s).length for s, _ in stored) < 1e-3
 note(match, "loops stay on their stored circles, join ignored")
 
+print("\n=== 7. Same Radius: one radius for all fixed circles ===")
+ob, c, n = two_ring_mesh(center_b=(0.3, 0.1, 0.0), radius_b=0.5)
+c.fix_circle = True
+radii = [item.radius for item in c.fixed_circles]
+note(len(radii) == 2 and not c.circle_same_radius and abs(radii[0] - radii[1]) > 0.3,
+     f"off by default, each circle keeps its own radius ({radii[0]:.3f}, {radii[1]:.3f})")
+c.circle_same_radius = True
+note(abs(c.circle_radius - sum(radii) / 2) < 1e-6 and all(abs(item.radius - c.circle_radius) < 1e-6 for item in c.fixed_circles),
+     f"switching on starts from the mean and writes it onto both ({c.circle_radius:.3f})")
+c.circle_radius = 0.7
+note(all(abs(item.radius - 0.7) < 1e-6 for item in c.fixed_circles), "editing the radius updates every circle")
+run(80)
+(ca, na, ra), (cb, nb, rb) = fitted_circles(ob, n)
+note(abs(ra - 0.7) < 5e-3 and abs(rb - 0.7) < 5e-3, f"both loops reach radius 0.7 ({ra:.3f}, {rb:.3f})")
+# a hand edit of one circle does not break the rule while it is on
+c.fixed_circles[0].radius = 0.4
+run(40)
+(ca, na, ra), (cb, nb, rb) = fitted_circles(ob, n)
+note(abs(ra - 0.7) < 5e-3, f"a per-circle edit is overridden while Same Radius is on ({ra:.3f})")
+c.circle_same_radius = False
+c.fixed_circles[0].radius = 0.4
+run(80)
+(ca, na, ra), (cb, nb, rb) = fitted_circles(ob, n)
+note(abs(ra - 0.4) < 5e-3 and abs(rb - 0.7) < 5e-3, f"off again: circles are independent ({ra:.3f}, {rb:.3f})")
+c.circle_same_radius = True
+before = c.circle_radius   # the mean of 0.4 and 0.7
+bpy.ops.ed.undo_push(message="ui")
+c.circle_radius = 0.9
+bpy.ops.ed.undo_push(message="ui")
+bpy.ops.ed.undo()
+note(c.circle_same_radius and (abs(c.circle_radius - before) < 1e-6 or abs(c.circle_radius - 0.9) < 1e-6)
+     and all(abs(item.radius - c.circle_radius) < 1e-6 for item in c.fixed_circles),
+     f"undo of a radius edit restores a consistent state (radius {c.circle_radius:.2f}, circles {[round(i.radius, 2) for i in c.fixed_circles]})")
+
+print("\n=== 8. Same Radius without Fix Circle: live fits, dictated size ===")
+ob, c, n = two_ring_mesh(center_b=(0.3, 0.1, 0.0), radius_b=0.5)
+(ca0, _, _), (cb0, _, _) = fitted_circles(ob, n)
+c.circle_same_radius = True
+note(not c.fix_circle and abs(c.circle_radius - 0.75) < 2e-2, f"switching on starts from the mean of the live fits ({c.circle_radius:.3f})")
+c.circle_radius = 0.6
+run(80)
+(ca, na, ra), (cb, nb, rb) = fitted_circles(ob, n)
+note(abs(ra - 0.6) < 5e-3 and abs(rb - 0.6) < 5e-3, f"both loops reach radius 0.6 ({ra:.3f}, {rb:.3f})")
+note((ca - ca0).length < 2e-2 and (cb - cb0).length < 2e-2, f"each around its own center ({(ca-ca0).length:.3f}, {(cb-cb0).length:.3f})")
+c.join_center = True
+run(80)
+(ca, na, ra), (cb, nb, rb) = fitted_circles(ob, n)
+note(abs(ra - 0.6) < 5e-3 and abs(rb - 0.6) < 5e-3 and (ca - cb).length < 5e-3,
+     f"with Join Center too: concentric and equal ({ra:.3f}, {rb:.3f}, centers {(ca-cb).length:.3f} apart)")
+c.circle_same_radius = False
+run(1)
+note(len(c.fixed_circles) == 0, "no circles get stored by Same Radius alone")
+
 print("\n" + ("ALL PASSED" if not fails else f"FAILURES: {fails}"))

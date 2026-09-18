@@ -2321,6 +2321,7 @@ def circle_verts_calculate(
     join_normal=False,
     draw_matrix=None,
     draw_color=None,
+    shared_radius=None,
 ):
     """Pull the vertices of loops onto a circle.
 
@@ -2339,6 +2340,10 @@ def circle_verts_calculate(
     coplanar loops become concentric and stacked loops coaxial, without being
     flattened onto one plane. Each loop keeps its own radius, refitted around
     the shared values.
+
+    With shared_radius given, every circle gets that radius - fitted or
+    stored, the center and normal still come from the fit, only the size is
+    dictated.
 
     Args:
         loops_data: List of loops, each as [verts_list, is_circular]
@@ -2419,6 +2424,10 @@ def circle_verts_calculate(
                 d = vert.co - c
                 radius += (d - n * d.dot(n)).length
             fitted[4] = radius / len(verts)
+
+    if shared_radius is not None and shared_radius > 0.0:
+        for fitted in fitted_loops:
+            fitted[4] = shared_radius
 
     for verts, is_circular, c, n, r in fitted_loops:
         if r <= 1e-12:
@@ -3213,6 +3222,7 @@ def evaluate_constraints(object, bmesh_edit=None, bmesh_eval=None, inverse_subdi
                 join_normal=c.join_normal,
                 draw_matrix=draw_matrix,
                 draw_color=draw_color,
+                shared_radius=c.circle_radius if c.circle_same_radius else None,
             )
 
         # evaluate curvature constraint
@@ -3811,27 +3821,67 @@ def update_circle_fix_flags(self, context):
     push_constraint_undo("Change Constraint")
 
 
-def _capture_circle_fix(self, context):
-    if self.constraint_type != "CIRCLE" or not self.fix_circle:
+_syncing_circle_radius = False
+
+
+def _sync_circle_radius(constraint, context):
+    """Start the shared radius from the mean radius of the circles as they
+    are now - stored ones when fixed, live fits otherwise - without firing
+    its update."""
+    global _syncing_circle_radius
+    if constraint.fix_circle and len(constraint.fixed_circles) > 0:
+        radii = [item.radius for item in constraint.fixed_circles]
+    else:
+        radii = [fit[2] for fit in _live_circle_fits(constraint, context)]
+    if not radii:
         return
+    _syncing_circle_radius = True
+    try:
+        constraint.circle_radius = sum(radii) / len(radii)
+    finally:
+        _syncing_circle_radius = False
 
-    mesh = context.active_object.data
-    bm = bmesh.from_edit_mesh(mesh)
 
-    if not self.attribute_name or self.attribute_name not in bm.edges.layers.float:
-        print(f"Constraint {self.name} Attribute {self.attribute_name} not found")
+def update_circle_radius(self, context):
+    """With Same Radius on, every stored circle follows the one radius"""
+    if _restoring_undo or _syncing_circle_radius:
         return
+    if self.circle_same_radius:
+        for item in self.fixed_circles:
+            item.radius = self.circle_radius
+    clear_constraints_cache()
+    push_constraint_undo("Change Constraint")
 
-    loops = utils.get_attribute_elements(
-        context.active_object, bm, self, domain="EDGE", as_domain="POINT"
-    )
-    # one stored circle per loop - a single shared circle would suck all loops
-    # onto the first one
+
+def update_circle_same_radius(self, context):
+    """Turning Same Radius on starts from the circles' mean radius and
+    writes it onto all of them; off leaves every circle with its own"""
+    if _restoring_undo:
+        return
+    if self.circle_same_radius:
+        _sync_circle_radius(self, context)
+        for item in self.fixed_circles:
+            item.radius = self.circle_radius
+    clear_constraints_cache()
+    push_constraint_undo("Change Constraint")
+
+
+def _live_circle_fits(constraint, context):
+    """Best-fit circle of every loop of the constraint as it is now, one
+    (center, normal, radius) per loop - the mirror seam completed like the
+    live evaluation does."""
+    ob = context.active_object
+    if ob is None or ob.mode != "EDIT":
+        return []
+    bm = bmesh.from_edit_mesh(ob.data)
+    if not constraint.attribute_name or constraint.attribute_name not in bm.edges.layers.float:
+        return []
+    loops = utils.get_attribute_elements(ob, bm, constraint, domain="EDGE", as_domain="POINT")
     mirror_planes = []
     user_preferences = bpy.context.preferences.addons[__package__].preferences
     if user_preferences.use_mirror:
-        mirror_planes = utils.get_mirror_data(context.active_object)
-    self.fixed_circles.clear()
+        mirror_planes = utils.get_mirror_data(ob)
+    fits = []
     for loop_data in loops:
         fit_verts = loop_data[0]
         if mirror_planes and not loop_data[1] and len(fit_verts) >= 2:
@@ -3840,8 +3890,22 @@ def _capture_circle_fix(self, context):
                 fit_verts = mirrored_fit_verts(fit_verts, *seam_plane)
         fit = fit_circle_to_loop(fit_verts)
         if fit is not None:
-            item = self.fixed_circles.add()
-            item.center, item.normal, item.radius = fit
+            fits.append(fit)
+    return fits
+
+
+def _capture_circle_fix(self, context):
+    if self.constraint_type != "CIRCLE" or not self.fix_circle:
+        return
+    # one stored circle per loop - a single shared circle would suck all loops
+    # onto the first one
+    self.fixed_circles.clear()
+    for fit in _live_circle_fits(self, context):
+        item = self.fixed_circles.add()
+        item.center, item.normal, item.radius = fit
+    if self.circle_same_radius:
+        for item in self.fixed_circles:
+            item.radius = self.circle_radius
 
 
 def filter_curves(self, object):
@@ -4375,6 +4439,23 @@ class CustomConstraint(bpy.types.PropertyGroup):
         update=update_circle_fix_flags,
     )
     fixed_circles: bpy.props.CollectionProperty(type=FixedCircleItem)
+    circle_same_radius: bpy.props.BoolProperty(
+        name="Same Radius",
+        default=False,
+        description="Give every circle of this constraint the one radius next"
+        "\nto this - e.g. a row of equal holes. Centers and normals still"
+        "\nfollow the loops (or the fixed circles), only the size is set."
+        "\nStarts from the circles' mean radius",
+        update=update_circle_same_radius,
+    )
+    circle_radius: bpy.props.FloatProperty(
+        name="Radius",
+        default=0.0,
+        min=0.0,
+        unit="LENGTH",
+        description="The radius shared by all circles while Same Radius is on",
+        update=update_circle_radius,
+    )
 
 
 def labeled_enum_row(layout, data, prop_name):
@@ -4607,13 +4688,20 @@ class VIEW3D_PT_final_topology_constraints(Panel):
                     row = layout.row()
                     row.prop(ac, "join_center")
                     row.prop(ac, "join_normal")
+                row = layout.row(align=True)
+                row.prop(ac, "circle_same_radius")
+                sub = row.row(align=True)
+                sub.active = ac.circle_same_radius
+                sub.prop(ac, "circle_radius", text="")
                 layout.prop(ac, "fix_circle")
                 if ac.fix_circle:
                     for item in ac.fixed_circles:
                         col = layout.column(align=True)
                         col.prop(item, "center")
                         col.prop(item, "normal")
-                        col.prop(item, "radius")
+                        radius_row = col.row()
+                        radius_row.enabled = not ac.circle_same_radius
+                        radius_row.prop(item, "radius")
             
             if ac.constraint_type == "INVERSE_SUBDIVIDE":
                 layout.label(text="Snap to")
@@ -4631,9 +4719,9 @@ class VIEW3D_PT_final_topology_constraints(Panel):
                     op.constraint_index = mesh.ft_custom_constraints_index
                     labeled_enum_row(layout, ac, "use_object_or_collection")
                     if ac.use_object_or_collection == "OBJECT":
-                        row.prop(ac, "invsubdiv_target_object", text="")
+                        layout.prop(ac, "invsubdiv_target_object", text="")
                     elif ac.use_object_or_collection == "COLLECTION":
-                        row.prop(ac, "invsubdiv_target_collection", text="")
+                        layout.prop(ac, "invsubdiv_target_collection", text="")
                 
                 layout.prop(ac, "invsubdiv_normal_offset", text="Normal Offset")
 

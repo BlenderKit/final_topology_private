@@ -19,53 +19,88 @@ running_operator = None
 
 
 
+def _set_if_changed(owner, attribute, value):
+    """Assign only when the value differs - every RNA write tags the object
+    for a depsgraph update, which would re-evaluate the subdivision for
+    nothing on each step."""
+    if getattr(owner, attribute) == value:
+        return 0
+    setattr(owner, attribute, value)
+    return 1
+
+
+# only the mesh, its mirror and its subdivision take part in the solve
+MODIFIERS_KEPT = ("ARMATURE", "MIRROR", "SUBSURF")
+
+
+def apply_modifier_rules(obj):
+    """Put the modifiers into the state the solver needs: other modifiers
+    hidden, the subdivision shown at level 1 or 2. Checks first and writes
+    only what differs, so calling it every step is free while nothing
+    changed and reverts a manual change when there was one. Returns the
+    number of settings written."""
+    writes = 0
+    for modifier in obj.modifiers:
+        if modifier.type == "SUBSURF":
+            writes += _set_if_changed(modifier, "show_viewport", True)
+            writes += _set_if_changed(modifier, "show_in_editmode", True)
+            writes += _set_if_changed(modifier, "levels", max(1, min(2, modifier.levels)))
+        elif modifier.type not in MODIFIERS_KEPT:
+            writes += _set_if_changed(modifier, "show_viewport", False)
+            writes += _set_if_changed(modifier, "show_in_editmode", False)
+    return writes
+
+
 def set_modifiers_start(obj):
+    """Remember the modifier settings and apply the solver's rules; the
+    remembered state goes back in set_modifiers_end."""
     modifiers_state_start = []
     for modifier in obj.modifiers:
-        mod_settings = {}
-        mod_settings["show_viewport"] = modifier.show_viewport
-        mod_settings["show_in_editmode"] = modifier.show_in_editmode
-        mod_settings["virtual"] = False
-        if modifier.type not in ["ARMATURE", "MIRROR", "SUBSURF"]:
-            modifier.show_viewport = False
-            modifier.show_in_editmode = False
-
+        mod_settings = {
+            "show_viewport": modifier.show_viewport,
+            "show_in_editmode": modifier.show_in_editmode,
+            "virtual": False,
+        }
         if modifier.type == "SUBSURF":
-            modifier.show_viewport = True
-            modifier.show_in_editmode = True
             mod_settings["levels"] = modifier.levels
-            # Only support levels 1 and 2
-            modifier.levels = min(2, modifier.levels)
-            modifier.levels = max(1, modifier.levels)
-
         modifiers_state_start.append(mod_settings)
 
     if len(obj.modifiers) == 0:
-        bpy.ops.object.modifier_add(type="SUBSURF")
-        modifier = obj.modifiers[0]
-        modifier.show_viewport = True
-        modifier.show_in_editmode = True
+        modifier = obj.modifiers.new("Subdivision", "SUBSURF")
         modifier.levels = 2
-        mod_settings = {}
-        mod_settings["show_viewport"] = modifier.show_viewport
-        mod_settings["show_in_editmode"] = modifier.show_in_editmode
-        mod_settings["levels"] = modifier.levels
-        mod_settings["virtual"] = True
-
-        modifiers_state_start.append(mod_settings)
+        modifiers_state_start.append(
+            {
+                "show_viewport": True,
+                "show_in_editmode": True,
+                "levels": 2,
+                "virtual": True,
+            }
+        )
+    apply_modifier_rules(obj)
     return modifiers_state_start
 
 
 def set_modifiers_end(obj, modifiers_state_start):
+    """Restore the remembered modifier settings, writing only what differs.
+    Returns the number of settings written."""
+    writes = 0
+    virtual = []
     for i, modifier in enumerate(obj.modifiers):
+        if i >= len(modifiers_state_start):
+            # added by the user while running - nothing to restore
+            continue
         mod_settings = modifiers_state_start[i]
-        if modifier.type == "SUBSURF":
-            modifier.levels = mod_settings["levels"]
-        modifier.show_viewport = mod_settings["show_viewport"]
-        modifier.show_in_editmode = mod_settings["show_in_editmode"]
-        # careful if this wouldn't be the last one could cause problems with for loop
         if mod_settings["virtual"]:
-            obj.modifiers.remove(modifier)
+            virtual.append(modifier)
+            continue
+        if modifier.type == "SUBSURF" and "levels" in mod_settings:
+            writes += _set_if_changed(modifier, "levels", mod_settings["levels"])
+        writes += _set_if_changed(modifier, "show_viewport", mod_settings["show_viewport"])
+        writes += _set_if_changed(modifier, "show_in_editmode", mod_settings["show_in_editmode"])
+    for modifier in virtual:
+        obj.modifiers.remove(modifier)
+        writes += 1
+    return writes
 
 
 
@@ -76,6 +111,10 @@ def final_topology_optimization_step(self, context, iterations=1, neighbours=1):
     - constraints
     """
     user_preferences = bpy.context.preferences.addons[__package__].preferences
+
+    # the modifiers were set up when the run started; a manual change in
+    # the meantime gets reverted here, otherwise this writes nothing
+    apply_modifier_rules(self.object)
 
     s_levels = inverse_subdivide.get_subdivision_modifier_level(self.object)
     if s_levels is None:
