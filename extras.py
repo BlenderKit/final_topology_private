@@ -3322,7 +3322,9 @@ def evaluate_constraints(object, bmesh_edit=None, bmesh_eval=None, inverse_subdi
                     (1, 0, 0, 1),
                     scale=1,
                 )
-        utils.move_verts_to_targets(bmesh_edit, target_offsets, weight=user_preferences.step_weight)
+        utils.move_verts_to_targets(
+            bmesh_edit, target_offsets, weight=user_preferences.step_weight * c.influence
+        )
 
     # constraints must not pull the mirror seam apart - vertices that started
     # on a mirror plane get put back onto it, they may only slide along it
@@ -4000,6 +4002,17 @@ class CustomConstraint(bpy.types.PropertyGroup):
         "\nL-shaped selection is two loops, not one with a corner",
         update=update_constraint_data,
     )
+    influence: bpy.props.FloatProperty(
+        name="Influence",
+        default=1.0,
+        min=0.0,
+        soft_max=2.0,
+        subtype="FACTOR",
+        description="How strongly this constraint moves its vertices each"
+        "\nstep, on top of the global step weight - turn it down where"
+        "\ntwo constraints fight over the same vertices",
+        update=update_constraint_data,
+    )
     works_on_subdivision: bpy.props.BoolProperty(
         name="Works on Subdivision",
         default=False,
@@ -4505,6 +4518,8 @@ class VIEW3D_PT_final_topology_constraints(Panel):
             layout.prop(ac, "constraint_type")
             if ac.constraint_type not in ("INVERSE_SUBDIVIDE", "PIN"):
                 layout.prop(ac, "works_on_subdivision")
+            if ac.constraint_type != "PIN":
+                layout.prop(ac, "influence", slider=True)
             if get_constraint_domain_type(ac.constraint_type) == "EDGE":
                 row = layout.row()
                 row.prop(ac, "stop_at_poles")
