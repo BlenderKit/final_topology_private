@@ -11,7 +11,7 @@ from mathutils import Vector, kdtree, Matrix, Euler, geometry
 # project into XY plane,
 up = Vector((0, 0, 1))
 from bisect import bisect_right
-from math import atan2, cos, exp, log, pi, radians, sin, sqrt
+from math import asin, atan2, cos, degrees, exp, log, pi, radians, sin, sqrt
 from random import random
 
 from bpy.props import (
@@ -465,8 +465,10 @@ def circle_through_points(a, b, c):
     v = c - a
     n = u.cross(v)
     n_length_sq = n.length_squared
-    # sin of the angle at a below 1e-4 counts as a straight line
-    if n_length_sq < u.length_squared * v.length_squared * 1e-8:
+    # sin of the angle at a below 1e-4 counts as a straight line; two points
+    # on top of each other (an edge slide passing through a vertex) make
+    # both sides zero, so that needs its own check
+    if n_length_sq <= 1e-30 or n_length_sq < u.length_squared * v.length_squared * 1e-8:
         return None
     return a + (
         v.length_squared * n.cross(u) + u.length_squared * v.cross(n)
@@ -1520,7 +1522,108 @@ def _get_inclination_axis_vector(axis_name):
         "+Z": Vector((0.0, 0.0, 1.0)),
         "-Z": Vector((0.0, 0.0, -1.0)),
     }
-    return axis_map.get(axis_name, Vector((0.0, 0.0, -1.0)))
+    return axis_map.get(axis_name, Vector((0.0, 0.0, 1.0)))
+
+
+def inclination_axis_of(constraint):
+    """The inclination axis as a local space direction - the direction the
+    shape rises toward: the preset, or the free vector"""
+    if constraint.inclination_axis == "CUSTOM":
+        axis = Vector(constraint.inclination_axis_vector)
+        if axis.length_squared > 1e-12:
+            return axis.normalized()
+        return Vector((0.0, 0.0, 1.0))
+    return _get_inclination_axis_vector(constraint.inclination_axis)
+
+
+# centroid of every inclination constraint's faces, in local space, refreshed
+# each evaluation so the gizmo can sit there without scanning the faces on
+# every redraw
+_inclination_centers = {}
+
+
+def inclination_cone_frame(axis_world, view_direction):
+    """The in-plane direction across the axis for the fan and the handles:
+    in the plane through the axis that faces the viewer"""
+    if view_direction is not None and abs(axis_world.dot(view_direction)) < 0.999:
+        return axis_world.cross(view_direction).normalized()
+    return axis_world.orthogonal().normalized()
+
+
+def inclination_cone_size(faces, matrix):
+    """Local centroid of the faces and the world slant length of the cone
+    drawn there, from how far the faces spread"""
+    centroid = Vector((0.0, 0.0, 0.0))
+    centers = []
+    for face in faces:
+        center = face.calc_center_median()
+        centers.append(center)
+        centroid += center
+    centroid /= len(faces)
+    spread = sum((c - centroid).length for c in centers) / len(centers)
+    if spread < 1e-6:
+        spread = sqrt(max(faces[0].calc_area(), 1e-12))
+    return centroid, max(spread * 0.75, 1e-4) * matrix.median_scale
+
+
+# the cone's slant length per constraint, refreshed with the centroid
+_inclination_slants = {}
+
+
+def draw_inclination_limit(faces, axis, max_angle, matrix, color, view_direction=None):
+    """A cone at the faces' centroid whose walls are the steepest faces
+    still allowed: it opens toward the axis (upward for +Z) with the half
+    angle Max Inclination, like a funnel. Faces leaning further out than
+    the cone wall are overhangs. Drawn green and translucent with its rim,
+    red fans in the plane facing the viewer for the overhang range between
+    the wall and the horizontal, and the axis through it.
+
+    Returns (local centroid, world slant length), or None without faces."""
+    if not faces:
+        return None
+    centroid, slant = inclination_cone_size(faces, matrix)
+    world_axis = (matrix.to_3x3() @ axis)
+    if world_axis.length_squared < 1e-12:
+        return centroid, slant
+    world_axis.normalize()
+    up = world_axis
+    apex = matrix @ centroid
+    side = inclination_cone_frame(world_axis, view_direction)
+    across = up.cross(side)
+
+    half = radians(max(0.0, min(max_angle, 89.9)))
+    allowed = (0.2, 0.9, 0.3, 0.3)
+    forbidden = (1.0, 0.2, 0.15, 0.3)
+    line = (color[0], color[1], color[2], 0.9)
+    rim = (0.3, 1.0, 0.4, 0.8)
+
+    # the cone of allowed surfaces and its rim
+    rim_points = []
+    for i in range(33):
+        a = 2.0 * pi * i / 32
+        direction = up * cos(half) + (side * cos(a) + across * sin(a)) * sin(half)
+        rim_points.append(apex + direction * slant)
+    for i in range(32):
+        draw.add_colored_tri((apex, rim_points[i], rim_points[i + 1]), (allowed, allowed, allowed))
+        draw.add_colored_line((rim_points[i], rim_points[i + 1]), (rim, rim))
+    for sign in (1.0, -1.0):
+        edge = apex + (up * cos(half) + side * sign * sin(half)) * slant
+        draw.add_colored_line((apex, edge), (rim, rim))
+    # the axis itself, up through the cone and out past its rim
+    draw.add_colored_line((apex, apex + world_axis * slant * 1.25), (line, line))
+
+    # the overhang range: from the cone wall down to the horizontal, on
+    # both sides in the facing plane
+    def point(phi):
+        return apex + (up * cos(phi) + side * sin(phi)) * slant
+
+    for start, end in ((half, pi * 0.5), (-half, -pi * 0.5)):
+        previous = point(start)
+        for i in range(1, 19):
+            current = point(start + (end - start) * i / 18)
+            draw.add_colored_tri((apex, previous, current), (forbidden, forbidden, forbidden))
+            previous = current
+    return centroid, slant
 
 
 def inclination_limit_calculate(
@@ -1529,9 +1632,20 @@ def inclination_limit_calculate(
     axis_name="-Z",
     max_angle=50.0,
     threshold_faces_subdiv=None,
+    axis=None,
 ):
-    """Limit face inclination by sliding lower-half vertices toward upper half with axis lock."""
-    axis = _get_inclination_axis_vector(axis_name)
+    """Limit face inclination by sliding lower-half vertices toward upper half with axis lock.
+
+    The axis is the direction the shape rises toward - up, the build
+    direction for printing. A face is an overhang when its normal points
+    away from the axis more steeply than the limit allows: closer than
+    90 - max_angle to the opposite of the axis. Faces facing along the
+    axis are always fine.
+    """
+    if axis is None:
+        axis = _get_inclination_axis_vector(axis_name)
+    # the solver works with the direction overhangs face: down
+    axis = -axis
     max_angle = max(0.0, min(max_angle, 89.9))
     threshold_angle = radians(90.0 - max_angle)
     epsilon = 1e-6
@@ -1569,6 +1683,11 @@ def inclination_limit_calculate(
         verts = list(face.verts)
 
         # Split the face vertices into "lower" and "upper" halves along measured axis.
+        heights = [v.co.dot(axis) for v in verts]
+        if max(heights) - min(heights) < 1e-6 * max(sqrt(max(face.calc_area(), 1e-12)), 1e-6):
+            # a flat cap has no lower half to slide toward an upper one -
+            # any split would be arbitrary and only warp the neighbours
+            continue
         sorted_verts = sorted(verts, key=lambda v: v.co.dot(axis), reverse=True)
         moving_count = max(1, min(len(sorted_verts) // 2, len(sorted_verts) - 1))
         moving_verts = sorted_verts[:moving_count]
@@ -2309,6 +2428,147 @@ def mirrored_fit_verts(verts, plane_co, plane_no, threshold):
         if abs(distance) > limit:
             points.append(_FitPoint(v.co - plane_no * (2.0 * distance)))
     return points
+
+
+def arc_fit(verts):
+    """Fit an open loop as a circular arc.
+
+    Returns (center, normal, radius, sweep, t, apex) or None: the best-fit
+    circle, the signed sweep angle from the first to the last vertex around
+    it (unwrapped along the loop, so arcs beyond 180 degrees measure right),
+    each vertex's fraction of the sweep, and the point halfway along the arc.
+    """
+    fit = fit_circle_to_loop(verts)
+    if fit is None:
+        return None
+    center, normal, radius = fit
+    u = normal.orthogonal().normalized()
+    w = normal.cross(u)
+    angles = []
+    for vert in verts:
+        d = vert.co - center
+        x = d.dot(u)
+        y = d.dot(w)
+        if x * x + y * y < 1e-18:
+            angles.append(angles[-1] if angles else 0.0)
+        else:
+            angles.append(atan2(y, x))
+    unwrapped = [angles[0]]
+    for i in range(1, len(angles)):
+        delta = angles[i] - angles[i - 1]
+        while delta > pi:
+            delta -= 2.0 * pi
+        while delta < -pi:
+            delta += 2.0 * pi
+        unwrapped.append(unwrapped[-1] + delta)
+    sweep = unwrapped[-1] - unwrapped[0]
+    if abs(sweep) < 1e-6:
+        return None
+    t = [(a - unwrapped[0]) / sweep for a in unwrapped]
+    mid = unwrapped[0] + sweep * 0.5
+    apex = center + (u * cos(mid) + w * sin(mid)) * radius
+    return center, normal, radius, sweep, t, apex
+
+
+def arc_verts_calculate(
+    loops_data,
+    distribution="ORIGINAL",
+    angle=None,
+    radius=None,
+    draw_matrix=None,
+    draw_color=None,
+):
+    """Pull every open loop onto a circular arc between its two ends.
+
+    Each loop gets its circle estimated first (center, radius and which way
+    it bulges). Without a set angle or radius the loop just settles on that
+    arc, its ends staying put. With an angle set, the ends still stay and
+    the arc between them bulges to sweep exactly that angle - the radius
+    follows from the chord. With a radius set, the sweep follows from the
+    chord instead (the minor arc, or the major one when the loop already
+    bulges past a half circle). With both set the chord has to change:
+    the ends slide symmetrically along their line so that the arc fits.
+
+    distribution 'ORIGINAL' keeps each vertex at its fraction of the sweep,
+    'EVEN' spreads the vertices at equal angles.
+
+    Returns a dictionary mapping vertex indices to offset vectors.
+    """
+    target_offsets = {}
+    offset_counts = {}
+    for loop_data in loops_data:
+        verts = loop_data[0]
+        if loop_data[1] or len(verts) < 3:
+            continue
+        fit = arc_fit(verts)
+        if fit is None:
+            continue
+        center, normal, fitted_radius, sweep, t, apex = fit
+
+        a = verts[0].co.copy()
+        b = verts[-1].co.copy()
+        chord = b - a
+        chord_length = chord.length
+        if chord_length < 1e-9:
+            continue
+        chord_dir = chord / chord_length
+        middle = (a + b) * 0.5
+        # which way the arc bulges away from its chord
+        bulge = apex - middle
+        bulge -= chord_dir * bulge.dot(chord_dir)
+        if bulge.length_squared < 1e-18:
+            bulge = normal.cross(chord_dir)
+        if bulge.length_squared < 1e-18:
+            continue
+        bulge.normalize()
+        plane_normal = chord_dir.cross(bulge).normalized()
+
+        theta = abs(sweep) if angle is None else angle
+        if radius is not None and angle is None:
+            # the chord decides the sweep for the wanted radius
+            half = min(1.0, chord_length / (2.0 * radius)) if radius > 1e-12 else 1.0
+            theta = 2.0 * asin(half)
+            if abs(sweep) > pi:
+                theta = 2.0 * pi - theta
+        theta = max(radians(0.5), min(2.0 * pi - radians(0.5), theta))
+
+        if angle is not None and radius is not None and radius > 1e-12:
+            # both dictated: the ends move along the chord to make it fit
+            chord_length = 2.0 * radius * sin(theta * 0.5)
+            a = middle - chord_dir * (chord_length * 0.5)
+            b = middle + chord_dir * (chord_length * 0.5)
+            target_radius = radius
+        else:
+            target_radius = chord_length / (2.0 * sin(theta * 0.5))
+        target_center = middle - bulge * (target_radius * cos(theta * 0.5))
+
+        u = (a - target_center).normalized()
+        w = plane_normal.cross(u)
+        # sweep towards the bulge side
+        sign = 1.0
+        test = target_center + (u * cos(theta * 0.5) + w * sin(theta * 0.5)) * target_radius
+        if (test - middle).dot(bulge) < 0.0:
+            sign = -1.0
+
+        count = len(verts)
+        for i, vert in enumerate(verts):
+            fraction = i / (count - 1) if distribution == "EVEN" else t[i]
+            phi = sign * theta * fraction
+            target = target_center + (u * cos(phi) + w * sin(phi)) * target_radius
+            add_loop_offset(target_offsets, offset_counts, vert.index, target - vert.co)
+
+        if draw_matrix is not None and draw_color is not None:
+            previous = None
+            for i in range(25):
+                phi = sign * theta * i / 24
+                point = draw_matrix @ (
+                    target_center + (u * cos(phi) + w * sin(phi)) * target_radius
+                )
+                if previous is not None:
+                    draw.add_line(previous, point, draw_color)
+                previous = point
+
+    return finish_loop_offsets(target_offsets, offset_counts)
 
 
 def circle_verts_calculate(
@@ -3159,13 +3419,38 @@ def evaluate_constraints(object, bmesh_edit=None, bmesh_eval=None, inverse_subdi
 
         # evaluate inclination limit constraint
         elif c.constraint_type == "INCLINATION_LIMIT":
+            axis = inclination_axis_of(c)
             target_offsets = inclination_limit_calculate(
                 bmesh_edit,
                 constrained_faces=constraint_elements_edit,
-                axis_name=c.inclination_axis,
                 max_angle=c.inclination_max_angle,
                 threshold_faces_subdiv=threshold_faces_subdiv,
+                axis=axis,
             )
+            centroid = None
+            if (
+                user_preferences.enable_draw_constraints
+                and cs[object.data.ft_custom_constraints_index] == c
+            ):
+                view_direction = None
+                region_data = getattr(bpy.context, "region_data", None)
+                if region_data is not None:
+                    view_direction = region_data.view_rotation @ Vector((0.0, 0.0, 1.0))
+                drawn = draw_inclination_limit(
+                    constraint_elements_edit,
+                    axis,
+                    c.inclination_max_angle,
+                    object.matrix_world,
+                    c.color,
+                    view_direction,
+                )
+                if drawn is not None:
+                    centroid, slant = drawn
+            if centroid is None and constraint_elements_edit:
+                centroid, slant = inclination_cone_size(constraint_elements_edit, object.matrix_world)
+            if centroid is not None:
+                _inclination_centers[(object.data.name, c.name)] = centroid.copy()
+                _inclination_slants[(object.data.name, c.name)] = slant
         
         # evaluate slide optimize constraint
         elif c.constraint_type == "SLIDE_OPTIMIZE":
@@ -3223,6 +3508,25 @@ def evaluate_constraints(object, bmesh_edit=None, bmesh_eval=None, inverse_subdi
                 draw_matrix=draw_matrix,
                 draw_color=draw_color,
                 shared_radius=c.circle_radius if c.circle_same_radius else None,
+            )
+
+        # evaluate arc constraint
+        elif c.constraint_type == "ARC":
+            draw_matrix = None
+            draw_color = None
+            if (
+                user_preferences.enable_draw_constraints
+                and cs[object.data.ft_custom_constraints_index] == c
+            ):
+                draw_matrix = object.matrix_world
+                draw_color = (c.color[0], c.color[1], c.color[2], 0.9)
+            target_offsets = arc_verts_calculate(
+                constraint_verts_loops,
+                distribution="EVEN" if c.even_distribution else "ORIGINAL",
+                angle=c.arc_angle if c.arc_same_angle else None,
+                radius=c.circle_radius if c.circle_same_radius else None,
+                draw_matrix=draw_matrix,
+                draw_color=draw_color,
             )
 
         # evaluate curvature constraint
@@ -3664,6 +3968,8 @@ def _constraint_load_post(scene, _depsgraph=None):
 
 
 def update_constraint_data(self, context):
+    if _syncing_circle_radius:
+        return
     clear_constraints_cache()
     # constraint property edits happen in edit mode, where Blender's own
     # property undo push doesn't reliably record them
@@ -3842,6 +4148,53 @@ def _sync_circle_radius(constraint, context):
         _syncing_circle_radius = False
 
 
+def _live_arc_sweeps(constraint, context):
+    """Sweep angle of every open loop of the constraint as it is now"""
+    ob = context.active_object
+    if ob is None or ob.mode != "EDIT":
+        return []
+    bm = bmesh.from_edit_mesh(ob.data)
+    if not constraint.attribute_name or constraint.attribute_name not in bm.edges.layers.float:
+        return []
+    sweeps = []
+    for verts, is_circular in utils.get_attribute_elements(
+        ob, bm, constraint, domain="EDGE", as_domain="POINT"
+    ):
+        if is_circular or len(verts) < 3:
+            continue
+        fit = arc_fit(verts)
+        if fit is not None:
+            sweeps.append(abs(fit[3]))
+    return sweeps
+
+
+def update_arc_same_angle(self, context):
+    """Turning Same Angle on starts from the arcs' mean sweep"""
+    if _restoring_undo:
+        return
+    if self.arc_same_angle:
+        sweeps = _live_arc_sweeps(self, context)
+        if sweeps:
+            self.arc_angle = sum(sweeps) / len(sweeps)
+    clear_constraints_cache()
+    push_constraint_undo("Change Constraint")
+
+
+def update_inclination_axis(self, context):
+    """A preset also sets the free vector, so the gizmo starts from it"""
+    if _restoring_undo:
+        return
+    if self.inclination_axis != "CUSTOM":
+        global _syncing_circle_radius
+        _syncing_circle_radius = True   # keeps the vector's update quiet
+        try:
+            self.inclination_axis_vector = _get_inclination_axis_vector(self.inclination_axis)
+        finally:
+            _syncing_circle_radius = False
+    clear_constraints_cache()
+    push_constraint_undo("Change Constraint")
+
+
 def update_circle_radius(self, context):
     """With Same Radius on, every stored circle follows the one radius"""
     if _restoring_undo or _syncing_circle_radius:
@@ -4010,6 +4363,14 @@ class CustomConstraint(bpy.types.PropertyGroup):
                 "MOD_SMOOTH",
                 12,
             ),
+            (
+                "ARC",
+                "Arc",
+                "Pull each open loop onto a circular arc between its ends,"
+                "\noptionally with one angle and one radius for all arcs",
+                "IPO_CIRC",
+                13,
+            ),
             # (
             #     "ANGLE",
             #     "Angle",
@@ -4125,16 +4486,32 @@ class CustomConstraint(bpy.types.PropertyGroup):
             ("-Y", "-Y", "Measure inclination against -Y axis"),
             ("+Z", "+Z", "Measure inclination against +Z axis"),
             ("-Z", "-Z", "Measure inclination against -Z axis"),
+            ("CUSTOM", "Custom", "A free axis, given as a vector below"),
         ],
-        default="-Z",
-        description="Axis used for inclination measurement",
+        default="+Z",
+        description="The direction the shape rises toward, e.g. the build"
+        "\ndirection when printing. Faces facing that way are fine, faces"
+        "\nfacing away from it further than the limit are overhangs. The"
+        "\ngreen cone shows the steepest allowed faces, red the overhang range",
+        update=update_inclination_axis,
+    )
+    inclination_axis_vector: bpy.props.FloatVectorProperty(
+        name="Axis Vector",
+        size=3,
+        default=(0.0, 0.0, 1.0),
+        subtype="DIRECTION",
+        description="The free inclination axis, in the object's local space",
+        update=update_constraint_data,
     )
     inclination_max_angle: bpy.props.FloatProperty(
         name="Max Inclination",
         default=50.0,
         min=0.0,
         max=89.9,
-        description="Maximum allowed inclination angle in degrees (compared using 90-angle against face normal/axis angle)",
+        description="How far from the axis a face may lean before it counts as"
+        "\nan overhang - the half angle of the green cone. Drag the cone's"
+        "\nrim handles to set it in the viewport",
+        update=update_constraint_data,
     )
     
     # Curve constraint properties
@@ -4439,6 +4816,25 @@ class CustomConstraint(bpy.types.PropertyGroup):
         update=update_circle_fix_flags,
     )
     fixed_circles: bpy.props.CollectionProperty(type=FixedCircleItem)
+    # Arc constraint properties (Same Radius is shared with the circle)
+    arc_same_angle: bpy.props.BoolProperty(
+        name="Same Angle",
+        default=False,
+        description="Give every arc of this constraint the one sweep angle next"
+        "\nto this. The ends stay put and the arc bulges to match, unless"
+        "\nSame Radius is on too - then the ends slide along their chord."
+        "\nStarts from the arcs' mean angle",
+        update=update_arc_same_angle,
+    )
+    arc_angle: bpy.props.FloatProperty(
+        name="Angle",
+        default=radians(90.0),
+        min=radians(1.0),
+        max=radians(359.0),
+        subtype="ANGLE",
+        description="The sweep angle shared by all arcs while Same Angle is on",
+        update=update_constraint_data,
+    )
     circle_same_radius: bpy.props.BoolProperty(
         name="Same Radius",
         default=False,
@@ -4538,6 +4934,10 @@ class VIEW3D_PT_final_topology_constraints(Panel):
         op.constraint_type = "CIRCLE_FIXED"
         op.name = "Circle Fixed"
 
+        op = row.operator("object.final_topology_add_constraint", text="", icon="IPO_CIRC")
+        op.constraint_type = "ARC"
+        op.name = "Arc"
+
         op = row.operator("object.final_topology_add_constraint", text="", icon="MOD_SOLIDIFY")
         op.constraint_type = "THICKNESS"
         op.name = "Thickness"
@@ -4601,7 +5001,8 @@ class VIEW3D_PT_final_topology_constraints(Panel):
                 layout.prop(ac, "works_on_subdivision")
             if ac.constraint_type != "PIN":
                 layout.prop(ac, "influence", slider=True)
-            if get_constraint_domain_type(ac.constraint_type) == "EDGE":
+            if get_constraint_domain_type(ac.constraint_type) == "EDGE" and ac.constraint_type not in ("ARC", "CIRCLE"):
+                # an arc or a circle is one loop as assigned, it never runs on
                 row = layout.row()
                 row.prop(ac, "stop_at_poles")
                 row.prop(ac, "stop_at_turns")
@@ -4680,6 +5081,19 @@ class VIEW3D_PT_final_topology_constraints(Panel):
                 sub.prop(ac, "thickness_max")
                 layout.prop(ac, "thickness_ray_length")
 
+            if ac.constraint_type == "ARC":
+                layout.prop(ac, "even_distribution")
+                row = layout.row(align=True)
+                row.prop(ac, "arc_same_angle")
+                sub = row.row(align=True)
+                sub.active = ac.arc_same_angle
+                sub.prop(ac, "arc_angle", text="")
+                row = layout.row(align=True)
+                row.prop(ac, "circle_same_radius")
+                sub = row.row(align=True)
+                sub.active = ac.circle_same_radius
+                sub.prop(ac, "circle_radius", text="")
+
             if ac.constraint_type == "CIRCLE":
                 labeled_enum_row(layout, ac, "projection")
                 layout.prop(ac, "even_distribution")
@@ -4727,6 +5141,8 @@ class VIEW3D_PT_final_topology_constraints(Panel):
 
             if ac.constraint_type == "INCLINATION_LIMIT":
                 layout.prop(ac, "inclination_axis")
+                if ac.inclination_axis == "CUSTOM":
+                    layout.prop(ac, "inclination_axis_vector", text="")
                 layout.prop(ac, "inclination_max_angle")
 
 
@@ -5068,7 +5484,7 @@ class AddSelectionToConstraintOperator(bpy.types.Operator):
         return {"FINISHED"}
 
 def get_constraint_domain_type(constraint_type):
-    if constraint_type in ["PLANE", "CURVE", "SLIDE_OPTIMIZE", "SPACE", "CURVATURE", "LINE", "CIRCLE"]:
+    if constraint_type in ["PLANE", "CURVE", "SLIDE_OPTIMIZE", "SPACE", "CURVATURE", "LINE", "CIRCLE", "ARC"]:
         return "EDGE"
     elif constraint_type in ["INVERSE_SUBDIVIDE", "THICKNESS", "PIN", "SMOOTH"]:
         return "POINT"
@@ -5178,6 +5594,13 @@ class AddConstraintOperator(bpy.types.Operator):
                 "Pull each vertex toward the average of its neighbours",
                 "MOD_SMOOTH",
                 14,
+            ),
+            (
+                "ARC",
+                "Arc",
+                "Pull each open loop onto a circular arc between its ends",
+                "IPO_CIRC",
+                15,
             ),
             # (
             #     "ANGLE",
@@ -5577,6 +6000,7 @@ CONSTRAINT_TYPE_ICONS = {
     "THICKNESS": "MOD_SOLIDIFY",
     "PIN": "PINNED",
     "SMOOTH": "MOD_SMOOTH",
+    "ARC": "IPO_CIRC",
 }
 
 
@@ -6249,6 +6673,72 @@ class FixedPlaneGizmoTarget:
         self.constraint.normal = rotation @ snapshot[1]
 
 
+class InclinationConeTarget:
+    """Two grab handles on the rim of the cone of allowed surfaces, in the
+    plane facing the viewer, like a spot light's size handle: dragging one
+    in or out changes Max Inclination, the cone follows."""
+
+    def __init__(self, object, constraint):
+        self.object = object
+        self.constraint = constraint
+        key = (object.data.name, constraint.name)
+        self.apex = object.matrix_world @ _inclination_centers.get(key, Vector((0.0, 0.0, 0.0)))
+        self.slant = _inclination_slants.get(key, 0.1)
+        axis = object.matrix_world.to_3x3() @ inclination_axis_of(constraint)
+        if axis.length_squared < 1e-12:
+            axis = Vector((0.0, 0.0, 1.0))
+        self.axis = axis.normalized()
+        region_data = getattr(bpy.context, "region_data", None)
+        view = region_data.view_rotation @ Vector((0.0, 0.0, 1.0)) if region_data else None
+        self.side = inclination_cone_frame(self.axis, view)
+
+    def count(self):
+        return 2
+
+    def _half_angle(self):
+        return radians(max(0.0, min(self.constraint.inclination_max_angle, 89.9)))
+
+    def location(self, index):
+        # on the rim of the cone of allowed surfaces, which opens away
+        # from the axis
+        sign = 1.0 if index == 0 else -1.0
+        half = self._half_angle()
+        return self.apex + (self.axis * cos(half) + self.side * sign * sin(half)) * self.slant
+
+    def snapshot(self, index):
+        return self.location(index)
+
+    def translate(self, index, snapshot, world_offset):
+        # the handle's new place sets the cone's half angle: the angle
+        # between the apex-to-handle direction and the axis - that angle
+        # is the max inclination itself
+        direction = snapshot + world_offset - self.apex
+        if direction.length_squared < 1e-12:
+            return
+        self.constraint.inclination_max_angle = max(
+            0.0, min(89.9, degrees(direction.angle(self.axis)))
+        )
+
+
+class InclinationGizmoGroup(gizmos.PointHandlesGizmoGroupBase, GizmoGroup):
+    bl_idname = "OBJECT_GGT_ft_inclination_constraint"
+    bl_label = "Max Inclination"
+    bl_space_type = "VIEW_3D"
+    bl_region_type = "WINDOW"
+    bl_options = {"3D", "PERSISTENT"}
+
+    @classmethod
+    def poll(cls, context):
+        ob, c = get_active_inclination_constraint(context)
+        return c is not None
+
+    def get_point_target(self, context):
+        ob, c = get_active_inclination_constraint(context)
+        if c is None:
+            return None
+        return InclinationConeTarget(ob, c)
+
+
 def get_active_fixed_plane_constraint(context):
     """The active constraint, if it's an enabled plane one with a fixed part."""
     ob = context.object
@@ -6571,6 +7061,7 @@ classes = [
     VIEW3D_PT_final_topology_curve_tweak,
     CurvePointsGizmoGroup,
     PlaneConstraintGizmoGroup,
+    InclinationGizmoGroup,
     # TransformConstraintGizmo,
 ]
 

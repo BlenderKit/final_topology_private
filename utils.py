@@ -257,10 +257,13 @@ def get_attribute_elements(
         # topology-aware sorting: follows edge loops through junctions, so a
         # fully assigned grid splits into its parallel loops instead of
         # zigzag paths
+        # circles and arcs take their loops exactly as assigned - the pole
+        # and turn stops aren't offered for them
+        unsplit = getattr(constraint, "constraint_type", "") in ("CIRCLE", "ARC")
         loops = sort_edges_into_loops(
             draw_elements,
-            stop_at_poles=getattr(constraint, "stop_at_poles", True),
-            stop_at_turns=getattr(constraint, "stop_at_turns", True),
+            stop_at_poles=not unsplit and getattr(constraint, "stop_at_poles", True),
+            stop_at_turns=not unsplit and getattr(constraint, "stop_at_turns", True),
         )
 
     elif domain == "FACE":

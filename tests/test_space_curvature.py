@@ -337,4 +337,21 @@ note(abs(kink1) < abs(kink0) * 0.5, f"and still evens the kink ({kink0*1000:.2f}
 flipped, kink0, kink1, narrowest = narrow_ladder(with_ring=True)
 note(flipped == 0 and narrowest > 0.0001, f"with Ring Width fighting it: no flip either (narrowest {narrowest*1000:.2f}mm, {flipped} flipped checks)")
 
+print("\n=== 10. coincident vertices never divide by zero ===")
+mod = __import__(MOD, fromlist=["extras"])
+ex = mod.extras
+a, b = Vector((0, 0, 0)), Vector((1, 0, 0))
+note(ex.circle_through_points(a, a, b) is None and ex.circle_through_points(a, b, b) is None and ex.circle_through_points(a, a, a) is None,
+     "a circle through two coincident points is reported as none")
+class _V:
+    def __init__(self, co): self.co = Vector(co)
+verts = [_V((0, 0, 0)), _V((1, 0, 0)), _V((1, 0, 0)), _V((2, 0.5, 0)), _V((3, 0, 0))]
+tknots = [0.0, 1.0, 1.0, 2.118, 3.236]
+try:
+    pos = ex.evaluate_arc(verts, tknots, 1.5)
+    ok = all(math.isfinite(x) for x in pos)
+except ZeroDivisionError:
+    ok = False
+note(ok, "evaluate_arc across a doubled vertex (mid edge slide) stays finite")
+
 print("\n" + ("ALL PASSED" if not fails else f"FAILURES: {fails}"))
