@@ -85,9 +85,23 @@ note(hasattr(bpy.types, "FT_MT_constraint_quick") and hasattr(bpy.types, "FT_MT_
 kmi = []
 for km in bpy.context.window_manager.keyconfigs.addon.keymaps:
     kmi += [k for k in km.keymap_items if k.idname == "wm.call_menu" and k.type == "C" and k.alt and not k.ctrl and not k.shift]
-# enabling the addon in a test registers on top of the startup registration,
-# so the item may appear twice here; every copy must call our menu
-note(len(kmi) >= 1 and all(k.properties.name == "FT_MT_constraint_quick" for k in kmi), f"Alt+C calls the quick menu ({len(kmi)} binding(s))")
+# enabling the addon in a test registers on top of the startup registration;
+# registration purges stale copies, so exactly one binding remains
+note(len(kmi) == 1 and kmi[0].properties.name == "FT_MT_constraint_quick", f"Alt+C calls the quick menu ({len(kmi)} binding(s))")
+pins = []
+for km in bpy.context.window_manager.keyconfigs.addon.keymaps:
+    pins += [k for k in km.keymap_items if k.idname == "object.final_topology_pin_selection"]
+note(len(pins) == 2 and sorted(bool(k.properties.unpin) for k in pins) == [False, True], f"one Shift+P and one Alt+P binding, no leftovers ({len(pins)})")
+bpy.ops.preferences.addon_disable(module=MOD); bpy.ops.preferences.addon_enable(module=MOD)
+# the cycle re-creates the preferences and reloads the module: the old
+# references dangle (writing through the old P crashes Blender)
+P = bpy.context.preferences.addons[MOD].preferences
+P.enable_draw_constraints = False; P.use_mirror = False
+ex = __import__(MOD + ".extras", fromlist=["x"])
+pins = []
+for km in bpy.context.window_manager.keyconfigs.addon.keymaps:
+    pins += [k for k in km.keymap_items if k.idname == "object.final_topology_pin_selection"]
+note(len(pins) == 2, f"a disable/enable cycle keeps it at two ({len(pins)})")
 ex = __import__(MOD + ".extras", fromlist=["x"])
 items = bpy.ops.object.final_topology_add_constraint.get_rna_type().properties["constraint_type"].enum_items
 note(all(ex.constraint_type_icon(i.identifier) != "CONSTRAINT" for i in items), f"every constraint type has an icon for the menus ({len(items)} types)")
@@ -113,5 +127,26 @@ new = FakeSelf(); ex.FT_MT_new_constraint.draw(new, bpy.context)
 ops = [c for c in new.layout.calls if c[0] == "operator"]
 note(len(ops) == len(items) and all(c[4].props["constraint_type"] == i.identifier and c[4].props["name"] == i.name for c, i in zip(ops, items)),
      f"submenu offers every constraint type with its label as the name ({len(ops)})")
+
+print("\n=== 5. Shift+Alt+C removes ===")
+kmi = []
+for km in bpy.context.window_manager.keyconfigs.addon.keymaps:
+    kmi += [k for k in km.keymap_items if k.idname == "wm.call_menu" and k.type == "C" and k.alt and k.shift and not k.ctrl]
+note(len(kmi) == 1 and kmi[0].properties.name == "FT_MT_constraint_quick_remove", f"Shift+Alt+C calls the remove menu ({len(kmi)})")
+rem = FakeSelf(); ex.FT_MT_constraint_quick_remove.draw(rem, bpy.context)
+ops = [c for c in rem.layout.calls if c[0] == "operator"]
+note([c[2] for c in ops[:2]] == ["A", "B"] and all(c[4].props["remove"] is True and c[4].props["index"] == i for i, c in enumerate(ops[:2]))
+     and ops[-1][1] == "object.final_topology_remove_selection_from_all",
+     "remove menu lists A and B with remove set, and From All last")
+# removing by index while the other constraint is active
+P.select_active_constraint = True
+mesh.ft_custom_constraints_index = 1
+select_only({0, 1})
+r = bpy.ops.object.final_topology_add_selection_to_constraint("EXEC_DEFAULT", index=0, remove=True)
+note(r == {"FINISHED"} and members(0) == (first | third | {30}) - {0, 1} and selected() == {0, 1},
+     f"removed from A by index, selection kept ({sorted(members(0))})")
+select_only({2})
+r = bpy.ops.object.final_topology_add_selection_to_constraint("EXEC_DEFAULT", index=1, remove=True)
+note(members(1) == {40, 41}, "removing verts that are not in B changes nothing")
 
 print("\n" + ("ALL PASSED" if not fails else f"FAILURES: {fails}"))

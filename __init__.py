@@ -556,6 +556,11 @@ classes = [
 ]
 
 addon_keymapitems = []
+ADDON_SHORTCUT_OPERATORS = {
+    "mesh.final_topology_modal",
+    "mesh.final_topology_optimization_step",
+    "object.final_topology_pin_selection",
+}
 
 
 def register():
@@ -569,6 +574,15 @@ def register():
 
     wm = bpy.context.window_manager
     km = wm.keyconfigs.addon.keymaps.new(name="Window", space_type="EMPTY")
+    # a reload that could not clean up (or an older build that only removed
+    # one item) leaves copies of our shortcuts behind - clear them first
+    for kmi in list(km.keymap_items):
+        if kmi.idname in ADDON_SHORTCUT_OPERATORS or (
+            kmi.idname == "wm.call_menu"
+            and getattr(kmi.properties, "name", "").startswith("FT_MT_")
+        ):
+            km.keymap_items.remove(kmi)
+    addon_keymapitems.clear()
 
     kmi = km.keymap_items.new(
         "mesh.final_topology_modal",
@@ -626,6 +640,17 @@ def register():
         )
         kmi.properties.name = "FT_MT_constraint_quick"
         addon_keymapitems.append(kmi)
+        # Shift+Alt+C: the reverse, remove the selection from a constraint
+        kmi = km.keymap_items.new(
+            "wm.call_menu",
+            type="C",
+            value="PRESS",
+            ctrl=False,
+            shift=True,
+            alt=True,
+        )
+        kmi.properties.name = "FT_MT_constraint_quick_remove"
+        addon_keymapitems.append(kmi)
 
 def unregister():
     # Remove classes
@@ -642,9 +667,10 @@ def unregister():
     wm = bpy.context.window_manager
     km = wm.keyconfigs.addon.keymaps["Window"]
 
-    try:
-        for kmi in addon_keymapitems:
+    for kmi in addon_keymapitems:
+        try:
             km.keymap_items.remove(kmi)
-            addon_keymapitems.clear()
-    except:
-        print("Seems you removed your keybindings manually.")
+        except Exception:
+            # removed by hand in the preferences already
+            pass
+    addon_keymapitems.clear()

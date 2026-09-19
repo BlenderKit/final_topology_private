@@ -48,6 +48,13 @@ def add_pin(co):
     draw_pins.append(tuple(co))
 
 
+def scale_alpha(colors, factor):
+    """The per-vertex colors with their alpha scaled - how Overlays Alpha
+    reaches every colored overlay at draw time, so the constraints hand in
+    their own alpha and the slider applies on top for all of them alike."""
+    return [(c[0], c[1], c[2], c[3] * factor) for c in colors]
+
+
 def add_colored_line(coords, colors):
     """Add one line with a color per end to the draw list.
 
@@ -291,18 +298,19 @@ def draw_callback_px_3d(self, context):
         else:
             smooth_shader = gpu.shader.from_builtin("SMOOTH_COLOR")
         smooth_shader.bind()
+        alpha = user_preferences.overlays_alpha
         if draw_colored_tris_pos:
             batch = batch_for_shader(
                 smooth_shader,
                 "TRIS",
-                {"pos": draw_colored_tris_pos, "color": draw_colored_tris_col},
+                {"pos": draw_colored_tris_pos, "color": scale_alpha(draw_colored_tris_col, alpha)},
             )
             batch.draw(smooth_shader)
         if draw_colored_lines_pos:
             batch = batch_for_shader(
                 smooth_shader,
                 "LINES",
-                {"pos": draw_colored_lines_pos, "color": draw_colored_lines_col},
+                {"pos": draw_colored_lines_pos, "color": scale_alpha(draw_colored_lines_col, alpha)},
             )
             batch.draw(smooth_shader)
 

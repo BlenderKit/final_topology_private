@@ -85,8 +85,30 @@ note("stop_at_poles" not in record and "arc_same_angle" in record, "arc has no p
 record, _ = draw_for("CIRCLE")
 note("stop_at_poles" not in record and "stop_at_turns" not in record and "fix_circle" in record, "circle has no pole/turn stops either")
 record, _ = draw_for("SPACE")
-note("stop_at_poles" in record, "space still has them")
+note("stop_at_poles" in record and "stop_at_crease" in record, "space still has them, plus the crease stop")
 record, _ = draw_for("PIN")
 note("influence" not in record, "pin has no influence slider")
+
+print("\n=== 3b. stop defaults per type ===")
+for t, expected in (("PLANE", False), ("PLANE_FIXED", False), ("CURVATURE", True), ("SPACE", True), ("LINE", True)):
+    draw_for(t)
+    ac = mesh.ft_custom_constraints[mesh.ft_custom_constraints_index]
+    stops = (ac.stop_at_poles, ac.stop_at_turns, ac.stop_at_crease)
+    note(stops == (expected,) * 3, f"{t}: stops {'off' if not expected else 'on'} by default ({stops})")
+
+print("\n=== 4. every gizmo group polls without errors for every constraint type ===")
+groups = [cls for cls in vars(ex).values() if isinstance(cls, type) and issubclass(cls, bpy.types.GizmoGroup) and cls is not bpy.types.GizmoGroup]
+note(len(groups) >= 4, f"{len(groups)} gizmo groups found")
+errors = []
+for t in types:
+    if t == "CURVE":
+        continue
+    draw_for(t)
+    for cls in groups:
+        try:
+            cls.poll(bpy.context)
+        except Exception as e:
+            errors.append(f"{cls.__name__} on {t}: {e!r}")
+note(not errors, f"all polls run ({errors[:3]})")
 
 print("\n" + ("ALL PASSED" if not fails else f"FAILURES: {fails}"))

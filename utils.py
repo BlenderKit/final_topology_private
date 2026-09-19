@@ -129,7 +129,7 @@ def is_pole(v):
     return valence != 4
 
 
-def sort_edges_into_loops(edges, stop_at_poles=True, stop_at_turns=True):
+def sort_edges_into_loops(edges, stop_at_poles=True, stop_at_turns=True, crease_layer=None):
     """Sort marked edges into loops, following the mesh topology.
 
     At each vertex the walk continues through the OPPOSITE edge - the marked
@@ -151,6 +151,12 @@ def sort_edges_into_loops(edges, stop_at_poles=True, stop_at_turns=True):
     straight through, via the opposite edge; where the marked edges bend
     around the crossing instead, the loop ends there and the bend starts a
     new one - an L-shaped selection is two loops, not one with a corner.
+
+    With crease_layer (the bmesh edge crease layer) a loop ends where a
+    creased edge touches it: an edge at the vertex that is neither the edge
+    the walk came in through nor the one it would leave by. The loop's own
+    edges may be creased, that changes nothing - a crease running along the
+    loop is fine, one crossing it is a break.
 
     Returns loops as [[vertex indices], is_circular], like
     get_connected_selections.
@@ -185,13 +191,22 @@ def sort_edges_into_loops(edges, stop_at_poles=True, stop_at_turns=True):
         else:
             return None
         if len(pool) == 1:
-            return pool[0]
-        # several equally valid continuations - take the straightest
-        direction = (v.co - incoming.other_vert(v).co).normalized()
-        return max(
-            pool,
-            key=lambda c: direction.dot((c.other_vert(v).co - v.co).normalized()),
-        )
+            chosen = pool[0]
+        else:
+            # several equally valid continuations - take the straightest
+            direction = (v.co - incoming.other_vert(v).co).normalized()
+            chosen = max(
+                pool,
+                key=lambda c: direction.dot((c.other_vert(v).co - v.co).normalized()),
+            )
+        if crease_layer is not None and any(
+            e[crease_layer] > 0.0
+            for e in v.link_edges
+            if e is not incoming and e is not chosen
+        ):
+            # a crease touching the path breaks it here
+            return None
+        return chosen
 
     loops = []
     for start in marked:
@@ -260,10 +275,14 @@ def get_attribute_elements(
         # circles and arcs take their loops exactly as assigned - the pole
         # and turn stops aren't offered for them
         unsplit = getattr(constraint, "constraint_type", "") in ("CIRCLE", "ARC")
+        crease_layer = None
+        if not unsplit and getattr(constraint, "stop_at_crease", True):
+            crease_layer = bm.edges.layers.float.get("crease_edge")
         loops = sort_edges_into_loops(
             draw_elements,
             stop_at_poles=not unsplit and getattr(constraint, "stop_at_poles", True),
             stop_at_turns=not unsplit and getattr(constraint, "stop_at_turns", True),
+            crease_layer=crease_layer,
         )
 
     elif domain == "FACE":

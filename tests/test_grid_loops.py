@@ -84,6 +84,48 @@ loops = mod.utils.sort_edges_into_loops(list(bm.edges), stop_at_poles=False)
 note(sum(1 for l in loops if not l[1]) < 16,
      f"without pole stops meridians run on through the poles ({len(loops)} loops)")
 
+print("\n=== 1c. creases end loops where they touch, not where they run along ===")
+ob = grid_setup(subdivisions=6)
+bm = bmesh.from_edit_mesh(ob.data); bm.verts.ensure_lookup_table(); _KEEP.append(bm)
+n_side = round(math.sqrt(len(bm.verts)))
+crease = bm.edges.layers.float.get("crease_edge") or bm.edges.layers.float.new("crease_edge")
+def is_row(e): return abs(e.verts[0].co.y - e.verts[1].co.y) < 1e-6
+rows = [e for e in bm.edges if is_row(e)]
+# one column edge in the middle of the grid gets creased: it touches two
+# row loops, and those must split at its vertices
+col_edges = [e for e in bm.edges if not is_row(e)]
+mid = min(col_edges, key=lambda e: (e.verts[0].co + e.verts[1].co).length)
+mid[crease] = 1.0
+plain = mod.utils.sort_edges_into_loops(rows, stop_at_poles=True, crease_layer=None)
+split = mod.utils.sort_edges_into_loops(rows, stop_at_poles=True, crease_layer=crease)
+note(len(plain) == n_side, f"without the crease layer: one loop per row ({len(plain)})")
+note(len(split) == n_side + 2, f"a creased column edge splits the two rows it touches ({len(split)} loops)")
+touched = {v.index for v in mid.verts}
+ends = {i for loop, _ in split for i in (loop[0], loop[-1])}
+note(touched <= ends, "the splits are exactly at the creased edge's vertices")
+# a crease along a row itself changes nothing
+mid[crease] = 0.0
+row_edge = min(rows, key=lambda e: (e.verts[0].co + e.verts[1].co).length)
+row_edge[crease] = 1.0
+along = mod.utils.sort_edges_into_loops(rows, stop_at_poles=True, crease_layer=crease)
+note(len(along) == n_side, f"a crease running along a loop leaves it whole ({len(along)})")
+# through the constraint: the option is on by default and reads the mesh's crease
+row_edge[crease] = 0.0; mid[crease] = 1.0
+for v in bm.verts: v.select = False
+for e in bm.edges:
+    e.select = is_row(e)
+    if e.select: e.verts[0].select = e.verts[1].select = True
+bmesh.update_edit_mesh(ob.data)
+bpy.ops.object.final_topology_add_constraint("EXEC_DEFAULT", constraint_type="CURVATURE", name="Cv")
+c = ob.data.ft_custom_constraints[0]
+bm = bmesh.from_edit_mesh(ob.data); _KEEP.append(bm)
+note(c.stop_at_crease, "Stop at Crease is on by default")
+loops = mod.utils.get_attribute_elements(ob, bm, c, domain="EDGE", as_domain="POINT")
+note(len(loops) == n_side + 2, f"the constraint's loops split at the crease ({len(loops)})")
+c.stop_at_crease = False
+loops = mod.utils.get_attribute_elements(ob, bm, c, domain="EDGE", as_domain="POINT")
+note(len(loops) == n_side, f"switched off, the rows are whole again ({len(loops)})")
+
 print("\n=== 2. simple ring selections keep working as before ===")
 for o in list(bpy.data.objects): bpy.data.objects.remove(o)
 bpy.ops.mesh.primitive_uv_sphere_add(segments=16, ring_count=12, radius=1.0)

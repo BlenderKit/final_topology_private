@@ -3399,7 +3399,7 @@ def evaluate_constraints(object, bmesh_edit=None, bmesh_eval=None, inverse_subdi
                 max_thickness=c.thickness_max,
                 ray_length=c.thickness_ray_length,
                 draw_matrix=draw_matrix,
-                draw_alpha=0.4 * user_preferences.overlays_alpha,
+                draw_alpha=0.4,
             )
 
         # evaluate smooth constraint
@@ -3619,11 +3619,12 @@ def evaluate_constraints(object, bmesh_edit=None, bmesh_eval=None, inverse_subdi
             and constraint_verts_loops
             and cs[object.data.ft_custom_constraints_index] == c
         ):
+            # Overlays Alpha applies at draw time, to every overlay alike
             draw_loop_deviation(
                 constraint_verts_loops,
                 target_offsets,
                 object.matrix_world,
-                0.9 * user_preferences.overlays_alpha,
+                0.9,
             )
 
         # move vertices to new locations
@@ -4418,6 +4419,13 @@ class CustomConstraint(bpy.types.PropertyGroup):
         "\nthrough a pole where it can",
         update=update_constraint_data,
     )
+    stop_at_crease: bpy.props.BoolProperty(
+        name="Stop at Crease",
+        default=True,
+        description="A loop ends where a creased edge touches it from the"
+        "\nside. Creases along the loop itself don't end it",
+        update=update_constraint_data,
+    )
     stop_at_turns: bpy.props.BoolProperty(
         name="Stop at Turns",
         default=True,
@@ -5006,6 +5014,7 @@ class VIEW3D_PT_final_topology_constraints(Panel):
                 row = layout.row()
                 row.prop(ac, "stop_at_poles")
                 row.prop(ac, "stop_at_turns")
+                row.prop(ac, "stop_at_crease")
 
             if ac.constraint_type == "PLANE":
                 row = layout.row()
@@ -5369,7 +5378,9 @@ class PinSelectionOperator(bpy.types.Operator):
             # that silently flipped on an already pinned selection was
             # too easy to mistake for the shortcut not working
             if not pins or not (selected & pinned):
+                self.report({"INFO"}, "Nothing to unpin in the selection")
                 return {"CANCELLED"}
+            freed = len(selected & pinned)
             _suppress_undo_push = True
             try:
                 for c in pins:
@@ -5385,6 +5396,7 @@ class PinSelectionOperator(bpy.types.Operator):
                 _suppress_undo_push = False
             clear_constraints_cache()
             push_constraint_undo("Unpin Selection")
+            self.report({"INFO"}, f"Unpinned {freed} vertices")
             return {"FINISHED"}
 
         # pin: into the active pin constraint, else the first one - and when
@@ -5398,9 +5410,12 @@ class PinSelectionOperator(bpy.types.Operator):
         if target is None and pins:
             target = pins[0]
         if target is None:
-            return bpy.ops.object.final_topology_add_constraint(
+            result = bpy.ops.object.final_topology_add_constraint(
                 "EXEC_DEFAULT", constraint_type="PIN", name="Pin"
             )
+            if result == {"FINISHED"}:
+                self.report({"INFO"}, f"Pinned {len(selected)} vertices in a new Pin constraint")
+            return result
 
         _suppress_undo_push = True
         try:
@@ -5418,6 +5433,12 @@ class PinSelectionOperator(bpy.types.Operator):
             _suppress_undo_push = False
         clear_constraints_cache()
         push_constraint_undo("Pin Selection")
+        fresh = len(selected - pinned)
+        state = "" if target.enabled else " - that constraint is disabled, enable it to see them"
+        if fresh:
+            self.report({"INFO"}, f"Pinned {fresh} vertices in '{target.name}'{state}")
+        else:
+            self.report({"INFO"}, f"Selection was already pinned in '{target.name}'{state}")
         return {"FINISHED"}
 
 
@@ -5691,6 +5712,12 @@ class AddConstraintOperator(bpy.types.Operator):
             actual_type = "CIRCLE"
         new_constraint.constraint_type = actual_type
         new_constraint.works_on_subdivision = self.works_on_subdivision
+        if actual_type == "PLANE":
+            # a plane wants its assigned loops whole, poles, turns and
+            # creases included - the stops start off for it
+            new_constraint.stop_at_poles = False
+            new_constraint.stop_at_turns = False
+            new_constraint.stop_at_crease = False
         if actual_type in ("CURVE", "LINE", "CIRCLE"):
             new_constraint.projection = self.projection
 
@@ -6054,6 +6081,42 @@ class FT_MT_constraint_quick(bpy.types.Menu):
         if len(constraints) > 0:
             layout.separator()
         layout.menu("FT_MT_new_constraint", icon="ADD")
+
+
+class FT_MT_constraint_quick_remove(bpy.types.Menu):
+    """Shift+Alt+C: take the selection out of a chosen constraint, or out
+    of all of them."""
+
+    bl_idname = "FT_MT_constraint_quick_remove"
+    bl_label = "Remove Selection from Constraint"
+
+    @classmethod
+    def poll(cls, context):
+        ob = context.active_object
+        return ob is not None and ob.type == "MESH" and ob.mode == "EDIT"
+
+    def draw(self, context):
+        layout = self.layout
+        layout.operator_context = "EXEC_DEFAULT"
+        mesh = context.active_object.data
+        constraints = mesh.ft_custom_constraints
+        if len(constraints) == 0:
+            layout.label(text="No constraints", icon="INFO")
+            return
+        for index, c in enumerate(constraints):
+            op = layout.operator(
+                "object.final_topology_add_selection_to_constraint",
+                text=c.name,
+                icon=constraint_type_icon(c.constraint_type),
+            )
+            op.index = index
+            op.remove = True
+        layout.separator()
+        layout.operator(
+            "object.final_topology_remove_selection_from_all",
+            text="From All Constraints",
+            icon="X",
+        )
 
 
 class CUSTOM_UL_constraint_list(bpy.types.UIList):
@@ -6720,6 +6783,23 @@ class InclinationConeTarget:
         )
 
 
+def get_active_inclination_constraint(context):
+    """The active constraint, if it's an enabled inclination limit one."""
+    ob = context.object
+    if not (ob and ob.type == "MESH" and ob.mode == "EDIT"):
+        return None, None
+    if not hasattr(ob.data, "ft_custom_constraints"):
+        return None, None
+    cs = ob.data.ft_custom_constraints
+    index = ob.data.ft_custom_constraints_index
+    if not (0 <= index < len(cs)):
+        return None, None
+    c = cs[index]
+    if c.constraint_type == "INCLINATION_LIMIT" and c.enabled:
+        return ob, c
+    return None, None
+
+
 class InclinationGizmoGroup(gizmos.PointHandlesGizmoGroupBase, GizmoGroup):
     bl_idname = "OBJECT_GGT_ft_inclination_constraint"
     bl_label = "Max Inclination"
@@ -7048,6 +7128,7 @@ classes = [
     CUSTOM_UL_constraint_list,
     FT_MT_new_constraint,
     FT_MT_constraint_quick,
+    FT_MT_constraint_quick_remove,
     VIEW3D_PT_final_topology_constraints,
     VIEW3D_PT_final_topology_extra_operators,
     gizmos.FTPointHandleGizmo,

@@ -126,6 +126,16 @@ apex2 = Vector(draw.draw_colored_tris_pos[0])
 rim = [Vector(draw.draw_colored_tris_pos[i + 1]) - apex2 for i in range(0, 32 * 3, 3)]
 note(abs(math.degrees(rim[0].angle(Vector((0, 0, 1)))) - 80.0) < 1e-3, "a larger max inclination opens the cone to 80 degrees")
 
+print("\n=== 3b. Overlays Alpha applies to every colored overlay at draw time ===")
+P.overlays_alpha = 0.25
+draw.clear_draw_list(); step()
+raw = {round(c[3], 3) for c in draw.draw_colored_tris_col}
+note(raw == {0.3}, f"the cone hands in its own alpha regardless of the slider ({sorted(raw)})")
+scaled = draw.scale_alpha(draw.draw_colored_tris_col, P.overlays_alpha)
+note(all(abs(c[3] - 0.075) < 1e-6 and c[:3] == r[:3] for c, r in zip(scaled, draw.draw_colored_tris_col)),
+     "the draw callback's scaling multiplies only the alpha by the slider")
+P.overlays_alpha = 1.0
+
 print("\n=== 4. the rim handles set Max Inclination, like a spot light's ===")
 ob, c = overhang_plane()
 step()
