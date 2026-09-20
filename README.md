@@ -2,7 +2,7 @@
 
 Blender 3D addon that introduces subdivision snapping, retopo and modeling tools from the 21st century.
 
-![Circle constraints on the rings of a lathe cage, solved live with the subdivision surface](docs/images/hero.png)
+![A subdivision cage retopologized over a scanned statue: the low-poly mesh snaps so that its subdivided surface follows the scan](docs/images/retopo_statue.jpg)
 
 This Blender 3D addon features many tools that were missing and also organizes some simple, but essential tools for polygonal modeling.
 The addon is distributed in two editions:
@@ -24,6 +24,8 @@ The addon is distributed in two editions:
 ## Final Topology for CAD professionals - features
 
 Everything from the Artists edition, plus the constraint system: edit mode constraints that get evaluated in a loop together with the subdivision surface snapping, so all conditions get optimized toward each other. The main difference compared to various shrinkwrap modifier tricks is that everything converges at once.
+
+![Circle constraints on the rings of a lathe cage, solved live with the subdivision surface](docs/images/hero.png)
 
 ### Constraints
 
