@@ -4,7 +4,7 @@ Blender 3D addon that introduces subdivision snapping, retopo and modeling tools
 
 ![A subdivision cage retopologized over a scanned statue: the low-poly mesh snaps so that its subdivided surface follows the scan](docs/images/retopo_statue.jpg)
 
-> **Support the development.** Final Topology is open source, and its development is funded by the people who use it. The easiest way to support it is to get the add-on through Blendkit: [Final Topology on Blendkit](https://www.blenderkit.com/asset-gallery-detail/388b195c-5a7d-4d9f-a632-0dac12c9198c/) with the [Full Plan](https://www.blenderkit.com/plans/pricing/), which also brings automatic updates through the Blendkit add-on and the whole asset library. Bug reports and pull requests are welcome here too.
+> **Support the development.** Final Topology is open source under the GPL v3, and its development is funded by the people who use it. The easiest way to support it is to get the add-on through Blendkit: [Final Topology on Blendkit](https://www.blenderkit.com/asset-gallery-detail/388b195c-5a7d-4d9f-a632-0dac12c9198c/) with the [Full Plan](https://www.blenderkit.com/plans/pricing/), which also brings automatic updates through the Blendkit add-on and the whole asset library. Bug reports and pull requests are welcome here too.
 
 This Blender 3D addon features many tools that were missing and also organizes some simple, but essential tools for polygonal modeling.
 The addon is distributed in two editions:
@@ -129,6 +129,10 @@ tests/run_all.sh
 ```
 
 Pass a file name to run a single suite, and set `BLENDER` to another binary if needed. Every suite prints PASS/FAIL lines and ends with ALL PASSED or FAILURES. `build.py --all` builds both editions into `out/`.
+
+## License
+
+Final Topology is free software under the GNU General Public License, version 3 or later. See [LICENSE](LICENSE).
 
 ## Basic instructions
 

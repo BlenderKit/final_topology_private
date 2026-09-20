@@ -7,7 +7,7 @@ maintainer = "Vilem Duha, BlenderKit <admin@blenderkit.com>"
 type = "add-on"
 tags = ["Mesh"]
 blender_version_min = "4.2.0"
-license = ["SPDX:"]
+license = ["SPDX:GPL-3.0-or-later"]
 website = "https://github.com/BlenderKit/final_topology"
 copyright = [
     "2023 Vilem Duha",
