@@ -2,7 +2,7 @@
 
 Blender 3D addon that introduces subdivision snapping, retopo and modeling tools from the 21st century.
 
-![Circle constraints on a lathe cage, solved live with the subdivision surface](docs/images/hero.png)
+![Circle constraints on the rings of a lathe cage, solved live with the subdivision surface](docs/images/hero.png)
 
 This Blender 3D addon features many tools that were missing and also organizes some simple, but essential tools for polygonal modeling.
 The addon is distributed in two editions:
@@ -28,14 +28,24 @@ Everything from the Artists edition, plus the constraint system: edit mode const
 ### Constraints
 
 - **Inverse subdivision** - the snapping as a constraint: works on a limited selection and mixes with the other constraints. Snap to the scene, an object or a collection, or freeze the current shape. Boundaries of the constrained area are handled well.
+
+  ![A cube cage snapping so that its subdivision surface matches a sphere](docs/images/invsub.png)
 - **Plane** - snaps loops to their best-fit plane, or to a fixed plane with editable center and normal. Join Center / Join Normal make multiple loops share one plane.
+
+  ![A wobbly ring of a lathe cage flattened by a plane constraint](docs/images/plane.png)
 - **Line** - straightens open loops onto the line between their ends, or onto stored fixed lines. Projected mode and even distribution.
+
+  ![A wavy row of a strip straightened by a line constraint](docs/images/line.png)
 - **Circle** - pulls loops onto their best-fit circles, or onto stored fixed circles; open loops land on arcs. Even distribution, projected mode, Join Center / Join Normal for concentric or coaxial rings, and Same Radius for all circles of the constraint, with or without fixing them.
 - **Arc** - open loops settle on circular arcs between their ends. Same Angle sets one sweep for all arcs with the ends staying put, Same Radius one radius with the sweep following from the chord; with both set the ends slide along their chord.
 
-  ![Three open loops with one Same Angle arc constraint, target arcs drawn](docs/images/arc.png)
+  ![Three ragged window openings turned into arches by one arc constraint](docs/images/arc.png)
 - **Curve** - snaps loops onto a curve object with true bezier evaluation, in 3D or projected onto the curve plane, optionally evenly distributed.
+
+  ![A row of a sheet following a bezier guide curve, with the curve's control point handles](docs/images/curve.png)
 - **Space** - spaces vertices along loops by local Blur (the default, settles around pinned vertices), evenly, or with a Same Ratio progression, sliding along arc, cubic or linear interpolation of the loop shape. Ring Width mode evens out the widths of edge rings instead, e.g. support loops.
+
+  ![Rows of a wavy sheet spaced evenly along their loops](docs/images/space.png)
 
   ![Ring Width evening the rungs of a curved band](docs/images/space_ring.png)
 - **Curvature** - evens out the curvature along loops, measured by arc length or turn angle, aiming for a blurred (default), constant or linearly changing profile, optionally sampling the loop's surroundings. Direction picks the in/out bending against the surface, the turning on the surface (corrected by sliding along the crossing edges, so narrow bands never fold), or both as two separate curvatures. Same Turn evens each same-direction bow on its own, Bridge Poles continues loops through the poles and corners they end on. An overlay draws every measured angle as a wedge with its hinge.
@@ -55,7 +65,7 @@ Everything from the Artists edition, plus the constraint system: edit mode const
 
 Pinned vertices count as the truth: in the circle, plane, line and arc fits each pin weighs as much as the whole loop, so the free vertices come to the pins instead of the pins standing off as outliers. Two pins with Even distribution place a circle outright so that every segment comes out equal, three or more pins lay the spacing out between them. Pins draw as red squares while the solver runs, sized after the theme's vertex size.
 
-![A ring with two pinned vertices: the circle passes through both pins and the segments come out even](docs/images/circle_pins.png)
+![A ragged hole in a plate becoming a circle through two pinned vertices, with even segments](docs/images/circle_pins.png)
 
 ### Loops
 
