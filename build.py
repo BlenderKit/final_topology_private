@@ -15,6 +15,7 @@ IGNORE_PATTERNS = [
     "*.md",
     ".DS_Store",
     "tests", # test suites are for development only
+    "docs",  # README pictures
 ]
 
 def variant_changes(workdir: str, pro_variant: bool):
