@@ -1,7 +1,7 @@
 schema_version = "1.0.0"
 id = "final_topology"
 name = "Final Topology - Inverse Subdivide"
-version = "2.1.0"
+version = "2.2.0"
 tagline = "Professional subdivision modelling tools, simply magic"
 maintainer = "Vilem Duha, BlenderKit <admin@blenderkit.com>"
 type = "add-on"

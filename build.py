@@ -8,6 +8,10 @@ IGNORE_PATTERNS = [
     os.path.basename(__file__), # do not include this file
     OUT_DIR, # do not include output directory
     ".gitignore",
+    ".git",       # the repository itself must never ship
+    ".claude",
+    "__pycache__",
+    "*.pyc",
     "*.md",
     ".DS_Store",
     "tests", # test suites are for development only

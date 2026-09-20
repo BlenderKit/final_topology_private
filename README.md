@@ -1,4 +1,4 @@
-# Final Topology addon for Blender 3D - 2.1.0
+# Final Topology addon for Blender 3D - 2.2.0
 
 Blender 3D addon that introduces subdivision snapping, retopo and modeling tools from the 21st century.
 
