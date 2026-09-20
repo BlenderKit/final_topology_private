@@ -21,6 +21,14 @@ The addon is distributed in two editions:
   - Settings for number of subdivisions and number of iterations of the algorithm. Higher iteration numbers yield more precise results.
 - **Shape Freeze** - enables changing the topology of a subdivision surface model while keeping the resulting shape as same as possible.
 
+![Final Topology snapping next to shrinkwrap or edit mode snapping on the same scan: the subdivided surface follows the scan instead of the cage](docs/images/snapping_vs_shrinkwrap.jpg)
+
+![A car roof cage snapped so that the subdivision surface result gets as close as possible to the target surface](docs/images/car_roof.jpg)
+
+![A circle cut on a cylinder: snapping the subdivision to its own previous shape solves the age-old problem](docs/images/circle_cut_on_cylinder.jpg)
+
+![Unsubdivide reverses the result of a subdivision modifier back to the low-resolution cage](docs/images/unsubdivide.jpg)
+
 ## Final Topology for CAD professionals - features
 
 Everything from the Artists edition, plus the constraint system: edit mode constraints that get evaluated in a loop together with the subdivision surface snapping, so all conditions get optimized toward each other. The main difference compared to various shrinkwrap modifier tricks is that everything converges at once.
@@ -91,9 +99,17 @@ Edge constraints split their assigned edges into loops the way Blender's loop se
 - **Flatten selection** - simple flatten to median plane operator (similar to LoopTools).
 - **Print-safe tools** - checks aimed at 3D-printable output.
 
+## Videos
+
+[![Final Topology Blender add-on overview](https://img.youtube.com/vi/-ha_HeSoavA/hqdefault.jpg)](https://www.youtube.com/watch?v=-ha_HeSoavA)
+
+- [Final Topology Blender add-on](https://www.youtube.com/watch?v=-ha_HeSoavA) - overview
+- [Final Topology Blender add-on tutorial](https://www.youtube.com/watch?v=5JWf-B89msU) - the tutorial the panel's Watch Tutorial button opens
+- [A new approach to Retopology](https://www.youtube.com/watch?v=7AR9-LxY6AQ) - the Blender Conference talk on the idea behind the add-on
+
 ## Download
 
-Final Topology add-on is available in [Full Plan subscription](https://www.blenderkit.com/plans/pricing/) to Blendkit.
+Final Topology add-on is available in [Full Plan subscription](https://www.blenderkit.com/plans/pricing/) to Blendkit: [Final Topology on Blendkit](https://www.blenderkit.com/asset-gallery-detail/388b195c-5a7d-4d9f-a632-0dac12c9198c/).
 
 ## Support
 
