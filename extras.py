@@ -3731,7 +3731,10 @@ def evaluate_constraints(object, bmesh_edit=None, bmesh_eval=None, inverse_subdi
                     pinned_verts.add(v.index)
                     # pins always show while running, they matter for
                     # reading what every other constraint is doing
-                    world_normal = object.matrix_world.inverted().transposed().to_3x3() @ v.normal
+                    # a wire vertex has no facing, its pin always shows
+                    world_normal = None
+                    if v.link_faces:
+                        world_normal = object.matrix_world.inverted().transposed().to_3x3() @ v.normal
                     draw.add_pin(object.matrix_world @ v.co, world_normal)
 
     # remember which vertices sit on a mirror seam before anything moves
