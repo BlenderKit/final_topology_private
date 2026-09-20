@@ -1459,14 +1459,29 @@ def build_kd_curve_cache(source_curve, endpoints_only=False, flatten=False):
     kd.balance()
     return kd
 
-def calculate_joined_normal(c, constraint_verts_loops):
+def pin_weights(verts, pinned):
+    """Fit weights for a loop: a pinned vertex weighs as much as the whole
+    loop, so any fit passes through the pins and the free vertices come to
+    them. None when nothing is pinned, the plain fit then."""
+    if not pinned:
+        return None
+    heavy = float(len(verts))
+    weights = [heavy if getattr(v, "index", None) in pinned else 1.0 for v in verts]
+    if heavy not in weights:
+        return None
+    return weights
+
+
+def calculate_joined_normal(c, constraint_verts_loops, pinned=None):
     # Calculate average normal from all loops (each loop keeps its own center)
     loop_normals = []
     joined_center = Vector((0, 0, 0))
     total_verts = 0
     for loop_data in constraint_verts_loops:
         if len(loop_data[0]) > 2:
-            _, loop_normal = utils.estimate_best_fit_plane(loop_data[0], "best_fit")
+            _, loop_normal = utils.estimate_best_fit_plane(
+                loop_data[0], "best_fit", pin_weights(loop_data[0], pinned)
+            )
             loop_normals.append(loop_normal)
             for v in loop_data[0]:
                 joined_center += v.co
@@ -2012,18 +2027,33 @@ def bridge_loop_through_poles(verts, is_circular, min_alignment=0.3):
         candidates = []
         for edge in pole.link_edges:
             other = edge.other_vert(pole)
-            if other is previous:
-                continue
             direction = other.co - pole.co
             if direction.length_squared < 1e-18:
                 continue
             alignment = ahead.dot(direction.normalized())
-            if alignment > min_alignment:
-                candidates.append((alignment, other))
+            if alignment < -0.5:
+                # the way the loop came from. Judged by direction, not by
+                # identity: on the subdivided mesh the loop's previous
+                # vertex is not adjacent to the pole any more, the edge
+                # back toward it leads to a subdivided vertex
+                continue
+            candidates.append((alignment, other))
         if not candidates:
             return None
-        candidates.sort(key=lambda c: -c[0])
-        chosen = [other for _, other in candidates[:2]]
+        aligned = [c for c in candidates if c[0] > min_alignment]
+        if aligned:
+            aligned.sort(key=lambda c: -c[0])
+            chosen = [other for _, other in aligned[:2]]
+        elif not getattr(pole, "is_boundary", True):
+            # nothing leans ahead - a box corner inside the mesh, where the
+            # loop meets the other edges at right angles. Their far ends'
+            # mean still says where the surface goes on, so the corner gets
+            # its sample and every loop into it bridges the same way. On a
+            # border the loop really ends: bridging into the edge across
+            # would turn it into the neighbouring loop
+            chosen = [other for _, other in candidates]
+        else:
+            return None
         co = sum((o.co for o in chosen), Vector((0.0, 0.0, 0.0))) / len(chosen)
         normal = sum((o.normal for o in chosen), Vector((0.0, 0.0, 0.0)))
         if normal.length_squared < 1e-12:
@@ -2083,8 +2113,11 @@ def curvature_calculate(
         verts = loop_data[0]
         is_circular = loop_data[1]
         prepended = 0
+        appended = 0
         if bridge_poles:
+            original_count = len(verts)
             verts, prepended = bridge_loop_through_poles(verts, is_circular)
+            appended = len(verts) - original_count - prepended
         if len(verts) < 3:
             continue
 
@@ -2093,6 +2126,13 @@ def curvature_calculate(
             movable = movable_ranges[loop_index]
             if prepended:
                 movable = (movable[0] + prepended, movable[1] + prepended)
+            # with Surroundings the loop's own ends stay anchored - but a
+            # bridged end has a continuation beyond it and a curvature
+            # sample of its own, so it moves like any other vertex
+            if prepended:
+                movable = (min(movable[0], prepended), movable[1])
+            if appended:
+                movable = (movable[0], max(movable[1], len(verts) - appended))
 
         # BOTH evens the in/out bending and the on-surface turning as two
         # separate fields, each moved along its own axis - a sharp turn on
@@ -2272,6 +2312,7 @@ def line_verts_calculate(
     projected=False,
     draw_matrix=None,
     draw_color=None,
+    pinned=None,
 ):
     """Pull the vertices of open loops onto a straight line.
 
@@ -2316,6 +2357,16 @@ def line_verts_calculate(
         else:
             line_start = verts[0].co.copy()
             line_end = verts[-1].co.copy()
+            weights = pin_weights(verts, pinned)
+            if weights is not None:
+                # pinned vertices can't come to the chord, so the line goes
+                # through them: a weighted best-fit line, the ends projected
+                # onto it move as well
+                fitted = fit_line_to_verts(verts, weights)
+                if fitted is not None:
+                    point, axis = fitted
+                    line_start = point + axis * (verts[0].co - point).dot(axis)
+                    line_end = point + axis * (verts[-1].co - point).dot(axis)
 
         direction = line_end - line_start
         line_length = direction.length
@@ -2341,19 +2392,56 @@ def line_verts_calculate(
     return finish_loop_offsets(target_offsets, offset_counts)
 
 
-def fit_circle_to_loop(verts):
+def fit_line_to_verts(verts, weights=None):
+    """Weighted best-fit line: (point on it, unit direction), or None."""
+    if len(verts) < 2:
+        return None
+    if weights is None:
+        weights = [1.0] * len(verts)
+    total = sum(weights)
+    if total <= 0.0:
+        return None
+    center = Vector((0.0, 0.0, 0.0))
+    for v, w in zip(verts, weights):
+        center += v.co * w
+    center /= total
+    import numpy as np
+
+    cov = np.zeros((3, 3))
+    for v, w in zip(verts, weights):
+        d = np.array(v.co - center)
+        cov += w * np.outer(d, d)
+    values, vectors = np.linalg.eigh(cov)
+    axis = Vector(vectors[:, 2])
+    if axis.length_squared < 1e-18 or values[2] <= 1e-18:
+        return None
+    axis.normalize()
+    # keep the direction pointing from the first to the last vertex
+    if axis.dot(verts[-1].co - verts[0].co) < 0:
+        axis = -axis
+    return center, axis
+
+
+def fit_circle_to_loop(verts, weights=None):
     """Best-fit circle through the loop vertices.
 
     Fits the best plane first, then a least squares circle in that plane, so it
     recovers the true circle also from a partial arc - where the centroid with a
     mean radius would land far off.
 
+    With weights (one per vertex) both fits are weighted: pinned vertices get
+    heavy weights so the circle passes through them and the free vertices
+    settle onto it, instead of a fit that the free vertices keep confirming
+    while the pinned ones stay off it forever.
+
     Returns (center, normal, radius) or None when the vertices don't define one.
     """
     if len(verts) < 3:
         return None
+    if weights is None:
+        weights = [1.0] * len(verts)
 
-    plane_center, normal = utils.estimate_best_fit_plane(verts, "best_fit")
+    plane_center, normal = utils.estimate_best_fit_plane(verts, "best_fit", weights)
     normal = Vector(normal)
     if normal.length_squared < 1e-12:
         return None
@@ -2363,10 +2451,12 @@ def fit_circle_to_loop(verts):
 
     import numpy as np
 
-    # Kasa fit: x^2 + y^2 + D*x + E*y + F = 0 is linear in D, E, F
+    # Kasa fit: x^2 + y^2 + D*x + E*y + F = 0 is linear in D, E, F; a row
+    # scaled by sqrt(w) weighs that vertex by w in the least squares
     pts = [((vert.co - plane_center).dot(u), (vert.co - plane_center).dot(v)) for vert in verts]
-    A = np.array([[x, y, 1.0] for x, y in pts])
-    b = np.array([-(x * x + y * y) for x, y in pts])
+    roots = [sqrt(max(w, 0.0)) for w in weights]
+    A = np.array([[x * r, y * r, r] for (x, y), r in zip(pts, roots)])
+    b = np.array([-(x * x + y * y) * r for (x, y), r in zip(pts, roots)])
     try:
         (D, E, F), _, rank, _ = np.linalg.lstsq(A, b, rcond=None)
     except np.linalg.LinAlgError:
@@ -2430,7 +2520,7 @@ def mirrored_fit_verts(verts, plane_co, plane_no, threshold):
     return points
 
 
-def arc_fit(verts):
+def arc_fit(verts, weights=None):
     """Fit an open loop as a circular arc.
 
     Returns (center, normal, radius, sweep, t, apex) or None: the best-fit
@@ -2438,7 +2528,7 @@ def arc_fit(verts):
     it (unwrapped along the loop, so arcs beyond 180 degrees measure right),
     each vertex's fraction of the sweep, and the point halfway along the arc.
     """
-    fit = fit_circle_to_loop(verts)
+    fit = fit_circle_to_loop(verts, weights)
     if fit is None:
         return None
     center, normal, radius = fit
@@ -2477,6 +2567,7 @@ def arc_verts_calculate(
     radius=None,
     draw_matrix=None,
     draw_color=None,
+    pinned=None,
 ):
     """Pull every open loop onto a circular arc between its two ends.
 
@@ -2500,7 +2591,7 @@ def arc_verts_calculate(
         verts = loop_data[0]
         if loop_data[1] or len(verts) < 3:
             continue
-        fit = arc_fit(verts)
+        fit = arc_fit(verts, pin_weights(verts, pinned))
         if fit is None:
             continue
         center, normal, fitted_radius, sweep, t, apex = fit
@@ -2571,6 +2662,45 @@ def arc_verts_calculate(
     return finish_loop_offsets(target_offsets, offset_counts)
 
 
+def two_pin_circle(verts, p, q, normal):
+    """The circle in the plane of normal through the pinned vertices at loop
+    positions p and q on which all of the loop's segments are even: they
+    subtend 2 pi * (q - p) / n at the center. Returns (center, radius) or
+    None when the pins coincide."""
+    count = len(verts)
+    span = (q - p) % count
+    if span == 0:
+        return None
+    a = verts[p].co
+    b = verts[q].co
+    chord = b - a
+    chord -= normal * chord.dot(normal)
+    length = chord.length
+    if length < 1e-9:
+        return None
+    theta = 2.0 * pi * span / count
+    half = theta * 0.5
+    radius = length / (2.0 * sin(half))
+    middle = (a + b) * 0.5
+    # the side of the chord the forward arc from p to q lies on
+    forward = [verts[(p + j) % count] for j in range(1, span)]
+    if forward:
+        mean = sum((v.co for v in forward), Vector((0.0, 0.0, 0.0))) / len(forward)
+    else:
+        backward = [verts[(q + j) % count] for j in range(1, count - span)]
+        mean = middle * 2 - sum((v.co for v in backward), Vector((0.0, 0.0, 0.0))) / max(len(backward), 1)
+    side = mean - middle
+    side -= normal * side.dot(normal)
+    side -= chord * (side.dot(chord) / (length * length))
+    if side.length_squared < 1e-18:
+        side = normal.cross(chord)
+    side.normalize()
+    # a minor arc bulges away from the center, a major one wraps around it:
+    # cos(half) changes sign exactly there
+    center = middle - side * (radius * cos(half))
+    return center, radius
+
+
 def circle_verts_calculate(
     loops_data,
     distribution="ORIGINAL",
@@ -2582,6 +2712,7 @@ def circle_verts_calculate(
     draw_matrix=None,
     draw_color=None,
     shared_radius=None,
+    pinned=None,
 ):
     """Pull the vertices of loops onto a circle.
 
@@ -2604,6 +2735,11 @@ def circle_verts_calculate(
     With shared_radius given, every circle gets that radius - fitted or
     stored, the center and normal still come from the fit, only the size is
     dictated.
+
+    pinned is the set of pinned vertex indices: they can't move, so the fit
+    is made to pass through them - each weighs as much as the whole loop -
+    and the free vertices come to them. Two pinned vertices then place a
+    circle, three fix it completely.
 
     Args:
         loops_data: List of loops, each as [verts_list, is_circular]
@@ -2646,7 +2782,14 @@ def circle_verts_calculate(
                 seam_plane = seam_plane_for_loop(verts, mirror_planes)
                 if seam_plane is not None:
                     fit_verts = mirrored_fit_verts(verts, *seam_plane)
-            fit = fit_circle_to_loop(fit_verts)
+            weights = None
+            if pinned:
+                heavy = float(len(fit_verts))
+                weights = [
+                    heavy if getattr(fv, "index", None) in pinned else 1.0
+                    for fv in fit_verts
+                ]
+            fit = fit_circle_to_loop(fit_verts, weights)
             if fit is None:
                 continue
             c, n, r = fit
@@ -2692,6 +2835,23 @@ def circle_verts_calculate(
     for verts, is_circular, c, n, r in fitted_loops:
         if r <= 1e-12:
             continue
+        if (
+            distribution == "EVEN"
+            and pinned
+            and is_circular
+            and not fixed_circles
+            and shared_radius is None
+        ):
+            anchors = [i for i, vert in enumerate(verts) if vert.index in pinned]
+            if len(anchors) == 2:
+                # two pins and even segments all around determine the circle
+                # completely: their loop distance says what angle they
+                # subtend at the center, the chord between them then fixes
+                # radius and center - the ring settles on that circle
+                # instead of one the free vertices happen to sit on
+                placed = two_pin_circle(verts, anchors[0], anchors[1], n)
+                if placed is not None:
+                    c, r = placed
         u = n.orthogonal().normalized()
         w = n.cross(u)
 
@@ -2726,7 +2886,40 @@ def circle_verts_calculate(
                 delta += 2.0 * pi
             unwrapped.append(unwrapped[-1] + delta)
 
-        if distribution == "EVEN":
+        anchors = []
+        if distribution == "EVEN" and pinned:
+            anchors = [i for i, vert in enumerate(verts) if vert.index in pinned]
+        if distribution == "EVEN" and anchors:
+            # pinned vertices can't take their even slot, so the even
+            # spacing is laid out between them instead, like the space
+            # constraint does around held vertices: every stretch between
+            # two consecutive pins (and the ends of an open loop) gets its
+            # vertices at equal angles, one pin alone sets the phase
+            count = len(verts)
+            target_angles = list(unwrapped)
+            if is_circular:
+                sweep = 2.0 * pi if unwrapped[-1] >= unwrapped[0] else -2.0 * pi
+                if len(anchors) == 1:
+                    p = anchors[0]
+                    step = sweep / count
+                    target_angles = [unwrapped[p] + step * ((i - p) % count) for i in range(count)]
+                else:
+                    for k, start in enumerate(anchors):
+                        end = anchors[(k + 1) % len(anchors)]
+                        span = (end - start) % count
+                        if span == 0:
+                            continue
+                        a0 = unwrapped[start]
+                        a1 = unwrapped[end] + (sweep if end < start else 0.0)
+                        for j in range(1, span):
+                            target_angles[(start + j) % count] = a0 + (a1 - a0) * j / span
+            else:
+                stops = sorted(set([0, count - 1] + anchors))
+                for start, end in zip(stops, stops[1:]):
+                    a0, a1 = unwrapped[start], unwrapped[end]
+                    for j in range(1, end - start):
+                        target_angles[start + j] = a0 + (a1 - a0) * j / (end - start)
+        elif distribution == "EVEN":
             if is_circular:
                 # a closed loop spans the full turn, in its own winding direction
                 sweep = 2.0 * pi if unwrapped[-1] >= unwrapped[0] else -2.0 * pi
@@ -2932,7 +3125,247 @@ def thickness_calculate(
     return target_offsets
 
 
-def surface_curvature_calculate(verts, factor=1.0, max_offset_ratio=0.3):
+def round_equation_sites(verts):
+    """The places Round writes its equations: for every vertex with faces
+    and each of its two loop directions, (v, back, back2, fore, fore2) -
+    the vertex, its loop neighbours and their next ones. Directions that
+    can't be walked two steps (borders, poles, fans) are skipped."""
+
+    def continue_straight(prev_vert, through_edge):
+        u = through_edge.other_vert(prev_vert)
+        candidates = [
+            e
+            for e in u.link_edges
+            if e is not through_edge and not set(e.link_faces) & set(through_edge.link_faces)
+        ]
+        if len(candidates) != 1:
+            return None
+        return candidates[0]
+
+    def walk(v, edge, steps):
+        chain = []
+        current, through = v, edge
+        for _ in range(steps):
+            nxt = through.other_vert(current)
+            chain.append(nxt)
+            through = continue_straight(current, through)
+            if through is None:
+                break
+            current = nxt
+        return chain
+
+    for v in verts:
+        if not v.link_faces:
+            continue
+        paired = set()
+        for edge in v.link_edges:
+            if edge in paired:
+                continue
+            partner = [
+                e
+                for e in v.link_edges
+                if e is not edge and not set(e.link_faces) & set(edge.link_faces)
+            ]
+            if len(partner) != 1:
+                continue
+            partner = partner[0]
+            paired.add(edge)
+            paired.add(partner)
+            back = walk(v, edge, 2)
+            fore = walk(v, partner, 2)
+            if len(back) < 2 or len(fore) < 2:
+                continue
+            yield v, back[0], back[1], fore[0], fore[1]
+
+
+def round_profile_curvature(prev_v, v, next_v):
+    """Arc-length curvature at v along prev->v->next on v's normal, with
+    the two edge lengths, or None on a degenerate edge."""
+    h1 = (v.co - prev_v.co).length
+    h2 = (next_v.co - v.co).length
+    if h1 < 1e-12 or h2 < 1e-12:
+        return None
+    second = 2.0 * (h2 * prev_v.co - (h1 + h2) * v.co + h1 * next_v.co) / (
+        h1 * h2 * (h1 + h2)
+    )
+    return -second.dot(v.normal), h1, h2
+
+
+def surface_curvature_calculate(verts, factor=1.0, max_offset_ratio=0.3, pinned=None, max_direct=1000):
+    """Fair the patch into a curvature-continuous blend with its surroundings.
+
+    The equations are the ones of surface_curvature_relax below - along each
+    of a vertex's two loop directions its profile curvature should equal the
+    mean of its two neighbours' - but instead of relaxing them a step at a
+    time, they are linearized around the current shape in the vertices'
+    normal offsets and solved at once (least squares). Every selected vertex
+    contributes its equations, pinned ones included; only the unpinned ones
+    are unknowns. A pinned vertex therefore shapes its surroundings into a
+    smooth surface through itself, instead of standing as a tent pole that
+    the relaxation would need thousands of steps to fair around.
+
+    The solve is used for open patches only - held by unselected
+    surroundings or by the mesh's border. A closed surface selected whole
+    has no bounded solution, curvature evens out best by growing, and takes
+    the relaxation instead, as do patches too large for a dense solve
+    (about 30 ms for 400 unknowns, growing with the square). A solved step
+    that does not improve the real equations is dropped for the
+    relaxation's step as well.
+    """
+    pinned = pinned or set()
+    movable = [v for v in verts if v.index not in pinned]
+    if not movable:
+        return {}
+    if len(movable) > max_direct:
+        return surface_curvature_relax(verts, factor, max_offset_ratio)
+
+    equations = list(round_equation_sites(verts))
+    if not equations:
+        return {}
+    # the direct solve needs a bounded problem: an open patch, held by
+    # unselected surroundings or by the mesh's own border. A closed surface
+    # selected whole has no such hold - its equations are satisfied best by
+    # a flat, hence huge, surface, pins hold points but not the surface
+    # between them, and every solver inflates it, this one fast and the
+    # relaxation slowly. The relaxation is the gentler tool there.
+    selected = {v.index for v in verts}
+    anchored = any(
+        n.index not in selected or n.is_boundary
+        for site in equations
+        for n in site
+    )
+    if not anchored:
+        return surface_curvature_relax(verts, factor, max_offset_ratio)
+    # a pole has no equations of its own (no two opposite loop directions)
+    # yet sits in its neighbours' equations; as a free lever it was the
+    # first thing a least squares solve sent flying. It stays an unknown,
+    # but gets a holding equation of its own below, so it moves only as
+    # far as its neighbours' smoothness asks
+    with_equations = {site[0].index for site in equations}
+    column = {v.index: i for i, v in enumerate(movable)}
+
+    def linear_terms():
+        """(k0, {vertex index: coefficient}) per site, curvature as a
+        linear function of the normal offsets"""
+        cache = {}
+
+        def terms(prev_v, v, next_v):
+            key = (prev_v.index, v.index, next_v.index)
+            if key in cache:
+                return cache[key]
+            k = round_profile_curvature(prev_v, v, next_v)
+            if k is None:
+                cache[key] = None
+                return None
+            k0, h1, h2 = k
+            c = 2.0 / (h1 * h2 * (h1 + h2))
+            out = {}
+            for vert, coefficient in (
+                (v, c * (h1 + h2)),
+                (prev_v, -c * h2 * v.normal.dot(prev_v.normal)),
+                (next_v, -c * h1 * v.normal.dot(next_v.normal)),
+            ):
+                if vert.index in column:
+                    out[vert.index] = out.get(vert.index, 0.0) + coefficient
+            cache[key] = (k0, out)
+            return cache[key]
+
+        return terms
+
+    terms = linear_terms()
+    rows = []
+    rhs = []
+    for v, back1, back2, fore1, fore2 in equations:
+        own = terms(back1, v, fore1)
+        k_back = terms(back2, back1, v)
+        k_fore = terms(v, fore1, fore2)
+        if own is None or k_back is None or k_fore is None:
+            continue
+        row = {}
+        for weight, (k0, coefficients) in ((1.0, own), (-0.5, k_back), (-0.5, k_fore)):
+            for index, coefficient in coefficients.items():
+                row[index] = row.get(index, 0.0) + weight * coefficient
+        if not row:
+            continue
+        rows.append(row)
+        rhs.append(-(own[0] - 0.5 * (k_back[0] + k_fore[0])))
+    if not rows:
+        return {}
+
+    import numpy as np
+
+    A = np.zeros((len(rows), len(movable)))
+    for r, row in enumerate(rows):
+        for index, coefficient in row.items():
+            A[r, column[index]] = coefficient
+    b = np.array(rhs)
+    # every equation counts the same: the coefficients scale with the
+    # inverse cube of the edge lengths, so without this a short-edged
+    # corner would outweigh a long-edged flank a hundred times over
+    norms = np.linalg.norm(A, axis=1)
+    norms[norms < 1e-30] = 1.0
+    A = A / norms[:, None]
+    b = b / norms
+    # the holding equations for poles: "stay", weighing as much as one of
+    # the normalized equations, so the neighbours' demands still move the
+    # pole but can't use it as a free lever
+    holds = [column[v.index] for v in movable if v.index not in with_equations]
+    if holds:
+        hold_rows = np.zeros((len(holds), len(movable)))
+        for r, col in enumerate(holds):
+            hold_rows[r, col] = 1.0
+        A = np.vstack([A, hold_rows])
+        b = np.append(b, np.zeros(len(holds)))
+    solution, _, _, _ = np.linalg.lstsq(A, b, rcond=None)
+
+    # one trust region for the whole step, so its direction survives
+    limits = [max_offset_ratio * min((e.calc_length() for e in v.link_edges), default=0.0) for v in movable]
+    ratio = 1.0
+    for d, limit in zip(solution, limits):
+        if abs(d) * factor > limit > 0.0:
+            ratio = min(ratio, limit / (abs(d) * factor))
+    solution = solution * ratio
+
+    target_offsets = {}
+    for v, d, limit in zip(movable, solution, limits):
+        if limit <= 0.0:
+            continue
+        step = max(-limit, min(limit, d * factor))
+        if abs(step) > 0.0:
+            target_offsets[v.index] = v.normal * step
+    if not target_offsets:
+        return {}
+
+    # accept the step only when the real equations improve under it
+    def residual_energy():
+        energy = 0.0
+        for v, back1, back2, fore1, fore2 in equations:
+            own = round_profile_curvature(back1, v, fore1)
+            k_back = round_profile_curvature(back2, back1, v)
+            k_fore = round_profile_curvature(v, fore1, fore2)
+            if own is None or k_back is None or k_fore is None:
+                continue
+            residual = own[0] - 0.5 * (k_back[0] + k_fore[0])
+            # the same weighting as the solve: the equation's own scale
+            energy += (residual * own[1] * own[2] * 0.5) ** 2
+        return energy
+
+    before = residual_energy()
+    for v in movable:
+        offset = target_offsets.get(v.index)
+        if offset is not None:
+            v.co += offset
+    after = residual_energy()
+    for v in movable:
+        offset = target_offsets.get(v.index)
+        if offset is not None:
+            v.co -= offset
+    if after <= before * 0.999 or before <= 1e-30:
+        return target_offsets
+    return surface_curvature_relax(verts, factor, max_offset_ratio)
+
+
+def surface_curvature_relax(verts, factor=1.0, max_offset_ratio=0.3):
     """Fair the patch into a curvature-continuous blend with its surroundings.
 
     Works per quad direction: every vertex lies on two crossing edge loops,
@@ -3027,6 +3460,86 @@ def surface_curvature_calculate(verts, factor=1.0, max_offset_ratio=0.3):
             step = max(-limit, min(limit, step))
             add_loop_offset(target_offsets, offset_counts, v.index, v.normal * step)
     return finish_loop_offsets(target_offsets, offset_counts)
+
+
+class _ProxyVert:
+    """A cage vertex seen through the subdivision: the cage's own edges and
+    faces, but the vertex's position and normal on the subdivided mesh."""
+
+    __slots__ = ("co", "normal", "index", "link_edges", "link_faces", "is_boundary", "select")
+
+    def __init__(self, vert, eval_vert):
+        self.co = eval_vert.co.copy()
+        self.normal = eval_vert.normal.copy()
+        self.index = vert.index
+        self.is_boundary = vert.is_boundary
+        self.select = vert.select
+        self.link_edges = []
+        self.link_faces = []
+
+
+class _ProxyEdge:
+    __slots__ = ("verts", "link_faces", "index")
+
+    def __init__(self, index):
+        self.index = index
+        self.verts = ()
+        self.link_faces = []
+
+    def other_vert(self, v):
+        a, b = self.verts
+        return b if a is v else a
+
+    def calc_length(self):
+        return (self.verts[0].co - self.verts[1].co).length
+
+
+class _ProxyFace:
+    __slots__ = ("verts", "edges", "index")
+
+    def __init__(self, index):
+        self.index = index
+        self.verts = ()
+        self.edges = ()
+
+
+def subdivided_cage_proxy(bmesh_edit, bmesh_eval):
+    """The whole cage as proxy vertices carrying their subdivided positions
+    and normals, keyed by vertex index.
+
+    Constraints that work on subdivision used to take the cage vertices'
+    counterparts in the evaluated mesh directly - fine for loop solvers,
+    which only read positions along an assigned loop, but wrong for the
+    smoothing ones, which walk a vertex's edges: on the subdivided mesh
+    those lead to the subdivided points a stone's throw away, all sitting
+    on the limit surface already, so every neighbour average came out
+    at the vertex itself and nothing moved. Here the neighbours are the
+    cage neighbours, their positions the subdivided ones."""
+    bmesh_eval.verts.ensure_lookup_table()
+    verts = {}
+    for v in bmesh_edit.verts:
+        eval_vert = bmesh_eval.verts[v.index] if v.index < len(bmesh_eval.verts) else v
+        verts[v.index] = _ProxyVert(v, eval_vert)
+    faces = {}
+    for f in bmesh_edit.faces:
+        proxy = _ProxyFace(f.index)
+        proxy.verts = tuple(verts[v.index] for v in f.verts)
+        faces[f.index] = proxy
+    for e in bmesh_edit.edges:
+        proxy = _ProxyEdge(e.index)
+        proxy.verts = (verts[e.verts[0].index], verts[e.verts[1].index])
+        proxy.link_faces = [faces[f.index] for f in e.link_faces]
+        for pv in proxy.verts:
+            pv.link_edges.append(proxy)
+    for f in bmesh_edit.faces:
+        proxy = faces[f.index]
+        proxy.edges = tuple(
+            next(pe for pe in verts[e.verts[0].index].link_edges if pe.index == e.index)
+            for e in f.edges
+        )
+        for pv in proxy.verts:
+            pv.link_faces.append(proxy)
+    return verts
 
 
 def smooth_verts_calculate(verts, factor=0.5, mode="BLEND"):
@@ -3218,7 +3731,8 @@ def evaluate_constraints(object, bmesh_edit=None, bmesh_eval=None, inverse_subdi
                     pinned_verts.add(v.index)
                     # pins always show while running, they matter for
                     # reading what every other constraint is doing
-                    draw.add_pin(object.matrix_world @ v.co)
+                    world_normal = object.matrix_world.inverted().transposed().to_3x3() @ v.normal
+                    draw.add_pin(object.matrix_world @ v.co, world_normal)
 
     # remember which vertices sit on a mirror seam before anything moves
     mirror_data = []
@@ -3296,7 +3810,7 @@ def evaluate_constraints(object, bmesh_edit=None, bmesh_eval=None, inverse_subdi
             
             if (c.join_center and not c.fix_center) or (c.join_normal and not c.fix_normal):
                 # Calculate common center and normal from all loops
-                joined_normal, joined_center = calculate_joined_normal(c,constraint_verts_loops)
+                joined_normal, joined_center = calculate_joined_normal(c, constraint_verts_loops, pinned_verts)
             if not c.join_center:
                 joined_center = None
             if not c.join_normal:
@@ -3315,6 +3829,7 @@ def evaluate_constraints(object, bmesh_edit=None, bmesh_eval=None, inverse_subdi
                         normal=normal,
                         fix_center=c.fix_center or (common_center is not None),
                         fix_normal=c.fix_normal or (joined_normal is not None),
+                        weights=pin_weights(loop_data[0], pinned_verts),
                     )
                     target_offsets.update(loop_offsets)
                 
@@ -3406,11 +3921,12 @@ def evaluate_constraints(object, bmesh_edit=None, bmesh_eval=None, inverse_subdi
         elif c.constraint_type == "SMOOTH":
             measure_verts = constraint_elements_edit
             if c.works_on_subdivision and bmesh_eval is not None:
-                bmesh_eval.verts.ensure_lookup_table()
-                measure_verts = [bmesh_eval.verts[v.index] for v in constraint_elements_edit]
+                # cage topology, subdivided positions - see the proxy
+                proxies = subdivided_cage_proxy(bmesh_edit, bmesh_eval)
+                measure_verts = [proxies[v.index] for v in constraint_elements_edit]
             if c.smooth_mode == "CURVATURE":
                 target_offsets = surface_curvature_calculate(
-                    measure_verts, factor=c.smooth_factor
+                    measure_verts, factor=c.smooth_factor, pinned=pinned_verts
                 )
             else:
                 target_offsets = smooth_verts_calculate(
@@ -3473,6 +3989,7 @@ def evaluate_constraints(object, bmesh_edit=None, bmesh_eval=None, inverse_subdi
                 draw_color = (c.color[0], c.color[1], c.color[2], 0.9)
             target_offsets = line_verts_calculate(
                 constraint_verts_loops,
+                pinned=pinned_verts,
                 distribution="EVEN" if c.even_distribution else "ORIGINAL",
                 fixed_lines=fixed_lines,
                 projected=c.projection == "PROJECTED",
@@ -3508,6 +4025,7 @@ def evaluate_constraints(object, bmesh_edit=None, bmesh_eval=None, inverse_subdi
                 draw_matrix=draw_matrix,
                 draw_color=draw_color,
                 shared_radius=c.circle_radius if c.circle_same_radius else None,
+                pinned=pinned_verts,
             )
 
         # evaluate arc constraint
@@ -3527,6 +4045,7 @@ def evaluate_constraints(object, bmesh_edit=None, bmesh_eval=None, inverse_subdi
                 radius=c.circle_radius if c.circle_same_radius else None,
                 draw_matrix=draw_matrix,
                 draw_color=draw_color,
+                pinned=pinned_verts,
             )
 
         # evaluate curvature constraint
@@ -5344,6 +5863,9 @@ class PinSelectionOperator(bpy.types.Operator):
         name="Unpin",
         default=False,
         description="Only remove the selected vertices from every pin constraint",
+        # never remembered from the last run: without this, one Alt+P made
+        # every later Shift+P unpin as well
+        options={"SKIP_SAVE"},
     )
 
     @classmethod

@@ -172,23 +172,29 @@ def sort_edges_into_loops(edges, stop_at_poles=True, stop_at_turns=True, crease_
     def continuation(v, incoming):
         if stop_at_poles and is_pole(v):
             return None
-        candidates = [
-            c for c in vert_edges.get(v, []) if c is not incoming and c not in used
-        ]
-        if not candidates:
+        # the decision looks at every marked edge at the vertex, used ones
+        # included - judged only by what is still free, the walk would turn
+        # a corner or not depending on which loop happened to be traced
+        # first, and a cube's corners came out different from each other
+        others = [c for c in vert_edges.get(v, []) if c is not incoming]
+        if not others:
             return None
         incoming_faces = set(incoming.link_faces)
-        opposite = [
-            c for c in candidates if not incoming_faces & set(c.link_faces)
-        ]
+        opposite = [c for c in others if not incoming_faces & set(c.link_faces)]
         if opposite:
-            pool = opposite
-        elif len(candidates) == 1:
+            pool = [c for c in opposite if c not in used]
+            if not pool:
+                return None
+        elif len(others) == 1:
+            if others[0] in used:
+                return None
             if stop_at_turns and v.link_faces and len(v.link_edges) == 4:
                 # a bend at a regular crossing: the loop doesn't turn corners
                 return None
-            pool = candidates
+            pool = others
         else:
+            # several ways on and none of them straight: a junction, the
+            # loop ends here whatever other loops already took
             return None
         if len(pool) == 1:
             chosen = pool[0]
@@ -415,7 +421,7 @@ def get_verts_near_plane(bm, center, normal, distance):
 
 
 
-def estimate_best_fit_plane(verts, method="best_fit"):
+def estimate_best_fit_plane(verts, method="best_fit", weights=None):
     """
     Estimate the best fit plane for a given set of vertices.
 
@@ -431,18 +437,24 @@ def estimate_best_fit_plane(verts, method="best_fit"):
 
     # Calculate the center of the vertices
     center = Vector((0, 0, 0))
-    for vert in verts:
-        center += vert.co
-    center /= len(verts)
+    if weights is None:
+        weights = [1.0] * len(verts)
+    total = sum(weights)
+    if total <= 0.0:
+        weights = [1.0] * len(verts)
+        total = float(len(verts))
+    for vert, w in zip(verts, weights):
+        center += vert.co * w
+    center /= total
 
     if method == "best_fit":
-        # Calculate the covariance matrix
+        # Calculate the (weighted) covariance matrix
         cov_matrix = [[0, 0, 0], [0, 0, 0], [0, 0, 0]]
-        for vert in verts:
+        for vert, w in zip(verts, weights):
             p = vert.co - center
             for i in range(3):
                 for j in range(3):
-                    cov_matrix[i][j] += p[i] * p[j]
+                    cov_matrix[i][j] += p[i] * p[j] * w
 
         # Compute the normal of the plane using the eigenvector corresponding to the smallest eigenvalue
         from numpy import linalg
@@ -478,18 +490,21 @@ def estimate_best_fit_plane(verts, method="best_fit"):
 
 
 def flatten_verts_calculate(
-    verts, slide=False, center=None, normal=None, fix_center=False, fix_normal=False
+    verts, slide=False, center=None, normal=None, fix_center=False, fix_normal=False,
+    weights=None,
 ):
     """Calculate new positions for vertices to be flattened, Return a dictionary with the new positions
     
     Args:
         fix_center: If True, use provided center; otherwise calculate from verts
         fix_normal: If True, use provided normal; otherwise calculate from verts
+        weights: optional per-vertex weights for the fit - pinned vertices
+            weigh heavily so the plane passes through them
     """
     target_offsets = {}
     
     # Calculate best-fit plane
-    estimated_center, estimated_normal = estimate_best_fit_plane(verts, "best_fit")
+    estimated_center, estimated_normal = estimate_best_fit_plane(verts, "best_fit", weights)
 
     if not fix_normal:
         normal = estimated_normal

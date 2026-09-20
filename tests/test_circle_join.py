@@ -165,4 +165,124 @@ c.circle_same_radius = False
 run(1)
 note(len(c.fixed_circles) == 0, "no circles get stored by Same Radius alone")
 
+print("\n=== 9. pinned vertices place the circle ===")
+def pinned_ring(move):
+    """one 16-vert ring; verts 0 and 8 get moved and pinned"""
+    for o in list(bpy.data.objects): bpy.data.objects.remove(o)
+    me = bpy.data.meshes.new("ring")
+    n = 16
+    coords = [(math.cos(2 * math.pi * i / n), math.sin(2 * math.pi * i / n), 0.0) for i in range(n)]
+    me.from_pydata(coords, [(i, (i + 1) % n) for i in range(n)], [])
+    ob = bpy.data.objects.new("ring", me); bpy.context.collection.objects.link(ob)
+    bpy.context.view_layer.objects.active = ob; ob.select_set(True)
+    ob.modifiers.new("Subdivision", "SUBSURF").levels = 1
+    bpy.ops.object.mode_set(mode="EDIT")
+    bpy.context.tool_settings.mesh_select_mode = (False, True, False)
+    bm = bmesh.from_edit_mesh(me); bm.verts.ensure_lookup_table(); _KEEP.append(bm)
+    for i, delta in ((0, move[0]), (8, move[1])):
+        bm.verts[i].co += Vector(delta)
+    for v in bm.verts: v.select = True
+    for e in bm.edges: e.select = True
+    bmesh.update_edit_mesh(me)
+    bpy.ops.object.final_topology_add_constraint("EXEC_DEFAULT", constraint_type="CIRCLE", name="C")
+    c = me.ft_custom_constraints[0]; c.even_distribution = True
+    bm = bmesh.from_edit_mesh(me); bm.verts.ensure_lookup_table(); _KEEP.append(bm)
+    for v in bm.verts: v.select = v.index in (0, 8)
+    bmesh.update_edit_mesh(me)
+    bpy.ops.object.final_topology_add_constraint("EXEC_DEFAULT", constraint_type="PIN", name="P")
+    return ob, n
+def residuals(ob, n):
+    bm = bmesh.from_edit_mesh(ob.data); bm.verts.ensure_lookup_table(); _KEEP.append(bm)
+    verts = [bm.verts[i] for i in range(n)]
+    center, normal, radius = mod.extras.fit_circle_to_loop(verts)
+    off = [abs((v.co - center).dot(normal)) + abs(((v.co - center) - normal * (v.co - center).dot(normal)).length - radius) for v in verts]
+    return center, radius, max(off[0], off[8]), max(off)
+# both pins pushed outward: the circle must grow to radius 1.3
+ob, n = pinned_ring(((0.3, 0, 0), (-0.3, 0, 0)))
+run(150)
+center, radius, pin_off, worst = residuals(ob, n)
+note(abs(radius - 1.3) < 5e-3 and pin_off < 5e-3 and worst < 5e-3, f"pins at radius 1.3: circle grows to them (r {radius:.3f}, pins off by {pin_off:.1e})")
+# both pins shifted: the circle must move over
+ob, n = pinned_ring(((0.4, 0.1, 0), (0.4, 0.1, 0)))
+run(150)
+center, radius, pin_off, worst = residuals(ob, n)
+# two pins leave a one-parameter family of circles (centers on their
+# perpendicular bisector, here x = 0.4); the free verts pick the member
+# nearest to where they were
+note(abs(center.x - 0.4) < 1e-2 and pin_off < 5e-3 and worst < 5e-3, f"pins shifted: circle follows them (center {tuple(round(x, 3) for x in center)}, pins off by {pin_off:.1e})")
+# pins tilted out of the plane: the circle must tilt
+ob, n = pinned_ring(((0, 0, 0.3), (0, 0, -0.3)))
+run(200)
+center, radius, pin_off, worst = residuals(ob, n)
+note(pin_off < 5e-3 and worst < 5e-3, f"pins out of plane: circle tilts through them (pins off by {pin_off:.1e}, worst {worst:.1e})")
+
+print("\n=== 10. even distribution lays out between pins ===")
+def angular_gaps(ob, n, center):
+    bm = bmesh.from_edit_mesh(ob.data); bm.verts.ensure_lookup_table(); _KEEP.append(bm)
+    angs = [math.atan2(bm.verts[i].co.y - center.y, bm.verts[i].co.x - center.x) for i in range(n)]
+    gaps = []
+    for i in range(n):
+        d = angs[(i + 1) % n] - angs[i]
+        while d <= -math.pi: d += 2 * math.pi
+        while d > math.pi: d -= 2 * math.pi
+        gaps.append(math.degrees(d))
+    return gaps
+# pin 0 slid 20 degrees along the circle, pin 8 in place: with two pins
+# the circle re-centres so that all gaps come out equal (section 11), the
+# pins then subtend their half turn on the new circle
+a = math.radians(20)
+ob, n = pinned_ring(((math.cos(a) - 1, math.sin(a), 0), (0, 0, 0)))
+run(250)
+center, radius, pin_off, worst = residuals(ob, n)
+gaps = angular_gaps(ob, n, center)
+note(worst < 5e-3, f"still a circle through both pins (worst off {worst:.1e})")
+note(max(gaps) - min(gaps) < 0.3, f"two pins: the ring re-centres and all 16 gaps are equal ({min(gaps):.2f}..{max(gaps):.2f} deg)")
+# one pin alone sets the phase: every gap equal, the pin at its own angle
+ob, n = pinned_ring(((math.cos(a) - 1, math.sin(a), 0), (0, 0, 0)))
+ob.data.ft_custom_constraints_index = 1
+bpy.ops.object.final_topology_delete_constraint("EXEC_DEFAULT")
+# select after deleting: activating the remaining constraint re-selects
+# its own elements (Select Active Constraint), which would pin everything
+bm = bmesh.from_edit_mesh(ob.data); bm.verts.ensure_lookup_table(); _KEEP.append(bm)
+for v in bm.verts: v.select = v.index == 0
+bmesh.update_edit_mesh(ob.data)
+bpy.ops.object.final_topology_add_constraint("EXEC_DEFAULT", constraint_type="PIN", name="P1")
+run(200)
+center, radius, pin_off, worst = residuals(ob, n)
+gaps = angular_gaps(ob, n, center)
+bm = bmesh.from_edit_mesh(ob.data); bm.verts.ensure_lookup_table(); _KEEP.append(bm)
+pin_angle = math.degrees(math.atan2(bm.verts[0].co.y - center.y, bm.verts[0].co.x - center.x))
+note(max(gaps) - min(gaps) < 0.3 and abs(pin_angle - 20.0) < 0.5, f"one pin: all 16 gaps equal, phase set by the pin ({min(gaps):.2f}..{max(gaps):.2f} deg, pin at {pin_angle:.1f})")
+
+print("\n=== 11. two pins set the circle: even segments all around ===")
+# opposite pins, one pushed outward: diameter becomes their distance
+ob, n = pinned_ring(((0.3, 0, 0), (0, 0, 0)))
+run(250)
+center, radius, pin_off, worst = residuals(ob, n)
+gaps = angular_gaps(ob, n, center)
+note(worst < 5e-3 and abs(radius - 1.15) < 5e-3 and abs(center.x - 0.15) < 5e-3, f"opposite pins 2.3 apart: circle of radius 1.15 through both (r {radius:.3f}, center x {center.x:.3f})")
+note(max(gaps) - min(gaps) < 0.3, f"all 16 gaps equal ({min(gaps):.2f}..{max(gaps):.2f} deg)")
+# pins a quarter turn apart (0 and 4), one pushed outward: they must
+# subtend 90 degrees, so the radius is their distance over sqrt 2
+def quarter_ring():
+    ob, n = pinned_ring(((0.2, 0, 0), (0, 0, 0)))
+    bm = bmesh.from_edit_mesh(ob.data); bm.verts.ensure_lookup_table(); _KEEP.append(bm)
+    ob.data.ft_custom_constraints_index = 1
+    bpy.ops.object.final_topology_delete_constraint("EXEC_DEFAULT")
+    bm = bmesh.from_edit_mesh(ob.data); bm.verts.ensure_lookup_table(); _KEEP.append(bm)
+    for v in bm.verts: v.select = v.index in (0, 4)
+    bmesh.update_edit_mesh(ob.data)
+    bpy.ops.object.final_topology_add_constraint("EXEC_DEFAULT", constraint_type="PIN", name="P")
+    return ob, n
+ob, n = quarter_ring()
+bm = bmesh.from_edit_mesh(ob.data); bm.verts.ensure_lookup_table(); _KEEP.append(bm)
+chord = (bm.verts[4].co - bm.verts[0].co).length
+run(250)
+center, radius, pin_off, worst = residuals(ob, n)
+bm = bmesh.from_edit_mesh(ob.data); bm.verts.ensure_lookup_table(); _KEEP.append(bm)
+gaps = angular_gaps(ob, n, center)
+pin_gap = math.degrees((bm.verts[4].co - center).angle(bm.verts[0].co - center))
+note(worst < 5e-3 and abs(radius - chord / math.sqrt(2)) < 5e-3, f"pins a quarter turn apart: radius is chord over sqrt 2 ({radius:.3f} vs {chord/math.sqrt(2):.3f})")
+note(abs(pin_gap - 90.0) < 0.5 and max(gaps) - min(gaps) < 0.3, f"they subtend 90 degrees and every gap is equal ({pin_gap:.1f} deg, gaps {min(gaps):.2f}..{max(gaps):.2f})")
+
 print("\n" + ("ALL PASSED" if not fails else f"FAILURES: {fails}"))

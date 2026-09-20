@@ -70,4 +70,16 @@ note(len(ob.modifiers) == 0, "end removes it again")
 r = bpy.ops.mesh.final_topology_optimization_step("EXEC_DEFAULT", iterations=1)
 note(len(ob.modifiers) == 0, f"a Step on a bare mesh leaves no modifier behind ({r})")
 
+print("\n=== 5. an object deleted mid-run has nothing to restore ===")
+ob = fresh(levels=3)
+state = ft.set_modifiers_start(ob)
+bpy.ops.object.mode_set(mode="OBJECT")
+bpy.data.objects.remove(ob)
+try:
+    writes = ft.set_modifiers_end(ob, state)
+    ok = writes == 0
+except ReferenceError:
+    ok = False
+note(ok, "end on a removed object returns quietly instead of raising")
+
 print("\n" + ("ALL PASSED" if not fails else f"FAILURES: {fails}"))

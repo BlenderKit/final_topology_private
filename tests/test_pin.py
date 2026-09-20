@@ -64,6 +64,36 @@ mod.draw.clear_draw_list()
 bpy.ops.mesh.final_topology_optimization_step("EXEC_DEFAULT", iterations=1)
 note(len(mod.draw.draw_pins) == len(pinned),
      f"one red square per pinned vert ({len(mod.draw.draw_pins)} for {len(pinned)})")
+note(all(n is not None for _, n in mod.draw.draw_pins), "every pin carries its world normal")
+# facing test: a pin on the near side shows, one on the far side is culled in
+# solid shading; without a normal it always shows
+from mathutils import Vector as _V
+eye = _V((0, 0, 5))
+note(mod.draw.pin_faces_viewer((0, 0, 1), (0, 0, 1), eye, None) and not mod.draw.pin_faces_viewer((0, 0, -1), (0, 0, -1), eye, None),
+     "perspective: pin facing the eye shows, pin facing away is culled")
+note(mod.draw.pin_faces_viewer((0, 0, 1), (0, 0, 1), None, _V((0, 0, 1))) and not mod.draw.pin_faces_viewer((0, 0, -1), (0, 0, -1), None, _V((0, 0, 1))),
+     "orthographic: judged against the view direction")
+note(mod.draw.pin_faces_viewer((0, 0, -1), None, eye, None), "a pin without a normal always shows")
+
+# the squares follow the theme's vertex size, so they stay larger than
+# enlarged vertices, e.g. when recording
+draw = __import__(MOD + ".draw", fromlist=["x"])
+theme = bpy.context.preferences.themes[0].view_3d
+scale = bpy.context.preferences.system.ui_scale
+theme.vertex_size = 3
+small = draw.pin_half_size()
+theme.vertex_size = 12
+large = draw.pin_half_size()
+theme.vertex_size = 3
+P.overlays_alpha = 0.5
+half = draw.pin_alpha()
+P.overlays_alpha = 0.2
+low = draw.pin_alpha()
+P.overlays_alpha = 1.0
+full = draw.pin_alpha()
+note(abs(half - 0.5) < 1e-6 and abs(low - 0.2) < 1e-6 and abs(full - 1.0) < 1e-6,
+     f"pins follow Overlays Alpha at double strength ({low:.2f} at 0.2, {half:.2f} at 0.5, {full:.2f} at 1.0)")
+note(small >= 4.0 and large * 2 > 12 * scale and large > small, f"pin square outgrows the vertex dot ({small*2:.1f}px at size 3, {large*2:.1f}px at size 12, vertex {12*scale:.1f}px)")
 
 print("\n=== 3. pinned verts resist inverse subdivision snapping ===")
 for o in list(bpy.data.objects): bpy.data.objects.remove(o)
@@ -149,5 +179,11 @@ note(r == {'FINISHED'} and pin_marks() == remaining - mixed and not (pin_marks()
 select_only(set(ridx[8:10]))
 r = bpy.ops.object.final_topology_pin_selection("EXEC_DEFAULT", unpin=True)
 note(r == {'CANCELLED'} and pin_marks() == remaining - mixed, "Alt+P on unpinned verts changes nothing")
+# the property must not be remembered: a plain call right after Alt+P pins
+select_only(set(ridx[8:10]))
+r = bpy.ops.object.final_topology_pin_selection("EXEC_DEFAULT")
+note(r == {'FINISHED'} and set(ridx[8:10]) <= pin_marks(), f"Shift+P right after Alt+P still pins ({sorted(pin_marks())})")
+km_items = [k for km in bpy.context.window_manager.keyconfigs.addon.keymaps for k in km.keymap_items if k.idname == "object.final_topology_pin_selection"]
+note(all(k.properties.unpin == k.alt for k in km_items), "the bindings state unpin explicitly: Alt+P on, Shift+P off")
 
 print("\n" + ("ALL PASSED" if not fails else f"FAILURES: {fails}"))

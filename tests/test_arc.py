@@ -139,6 +139,21 @@ angles = [math.atan2(bm.verts[i].co.y - center.y, bm.verts[i].co.x - center.x) f
 gaps = [angles[i + 1] - angles[i] for i in range(N - 1)]
 note(max(gaps) - min(gaps) < 1e-3, f"equal angular gaps (spread {math.degrees(max(gaps) - min(gaps)):.3f} deg)")
 
+print("\n=== 6b. a pinned vertex places the arc ===")
+ob, c = arcs_mesh()
+bm = bmesh.from_edit_mesh(ob.data); bm.verts.ensure_lookup_table(); _KEEP.append(bm)
+mid = N // 2
+bm.verts[mid].co *= 1.2       # pushed outward radially
+bpy.context.tool_settings.mesh_select_mode = (True, False, False)
+for v in bm.verts: v.select = v.index == mid
+bmesh.update_edit_mesh(ob.data)
+bpy.ops.object.final_topology_add_constraint("EXEC_DEFAULT", constraint_type="PIN", name="P")
+run(200)
+center, r, sweep, chord, (a, b), res = measure(ob)
+bm = bmesh.from_edit_mesh(ob.data); bm.verts.ensure_lookup_table(); _KEEP.append(bm)
+pin_off = abs((bm.verts[mid].co - center).length - r)
+note(res < 5e-3 and pin_off < 5e-3, f"arc passes through the pinned vertex (pin off by {pin_off:.1e}, worst {res:.1e})")
+
 print("\n=== 7. a closed loop is left alone ===")
 for o in list(bpy.data.objects): bpy.data.objects.remove(o)
 bpy.ops.mesh.primitive_circle_add(vertices=12, radius=1.0, location=(0, 0, 0))

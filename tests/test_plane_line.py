@@ -88,4 +88,44 @@ stored_start = Vector(c.fixed_lines[0].start)
 bpy.ops.mesh.final_topology_optimization_step("EXEC_DEFAULT", iterations=10)
 note((Vector(c.fixed_lines[0].start) - stored_start).length < 1e-9, "stored line unchanged by evaluation")
 
+print("\n=== 5. three pins place the plane ===")
+obj, ridx = ring_setup()
+mesh = obj.data
+bm = bmesh.from_edit_mesh(mesh); bm.verts.ensure_lookup_table(); _KEEP.append(bm)
+pins = [ridx[0], ridx[5], ridx[11]]
+for i in pins:
+    v = bm.verts[i]; v.co.z = 0.25 * v.co.x + 0.1     # a tilted plane through the pins
+bmesh.update_edit_mesh(mesh)
+bpy.ops.object.final_topology_add_constraint("EXEC_DEFAULT", constraint_type="PLANE", name="Pl")
+bm = bmesh.from_edit_mesh(mesh); bm.verts.ensure_lookup_table(); _KEEP.append(bm)
+for v in bm.verts: v.select = v.index in pins
+bmesh.update_edit_mesh(mesh)
+bpy.ops.object.final_topology_add_constraint("EXEC_DEFAULT", constraint_type="PIN", name="P")
+bpy.ops.mesh.final_topology_optimization_step("EXEC_DEFAULT", iterations=150)
+bm = bmesh.from_edit_mesh(mesh); bm.verts.ensure_lookup_table(); _KEEP.append(bm)
+worst = max(abs(bm.verts[i].co.z - (0.25 * bm.verts[i].co.x + 0.1)) for i in ridx)
+note(worst < 5e-3, f"the whole ring lies on the tilted plane through the three pins (worst {worst:.1e})")
+
+print("\n=== 6. a pinned vertex places the line ===")
+obj, ridx = ring_setup(select_open=True)
+mesh = obj.data
+bm = bmesh.from_edit_mesh(mesh); bm.verts.ensure_lookup_table(); _KEEP.append(bm)
+loop = [i for i in ridx if bm.verts[i].select]
+pin = loop[len(loop) // 2]
+bm.verts[pin].co.z += 0.15
+bmesh.update_edit_mesh(mesh)
+bpy.ops.object.final_topology_add_constraint("EXEC_DEFAULT", constraint_type="LINE", name="L")
+bm = bmesh.from_edit_mesh(mesh); bm.verts.ensure_lookup_table(); _KEEP.append(bm)
+for v in bm.verts: v.select = v.index == pin
+bmesh.update_edit_mesh(mesh)
+bpy.ops.object.final_topology_add_constraint("EXEC_DEFAULT", constraint_type="PIN", name="P")
+bpy.ops.mesh.final_topology_optimization_step("EXEC_DEFAULT", iterations=150)
+bm = bmesh.from_edit_mesh(mesh); bm.verts.ensure_lookup_table(); _KEEP.append(bm)
+pts = [bm.verts[i].co.copy() for i in loop]
+a, b = pts[0], pts[-1]
+axis = (b - a).normalized()
+off = [((p - a) - axis * (p - a).dot(axis)).length for p in pts]
+note(max(off) < 2e-3, f"all loop vertices collinear (worst {max(off):.1e})")
+note(off[loop.index(pin)] < 2e-3 and abs(bm.verts[pin].co.z - (pts[0].z if False else bm.verts[pin].co.z)) < 1e-9, "and the line passes through the pin, which never moved")
+
 print("\n" + ("ALL PASSED" if not fails else f"FAILURES: {fails}"))

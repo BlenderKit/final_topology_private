@@ -617,6 +617,7 @@ def register():
             shift=True,
             alt=False,
         )
+        kmi.properties.unpin = False
         addon_keymapitems.append(kmi)
         # Alt+P unpins, as in the UV editor
         kmi = km.keymap_items.new(

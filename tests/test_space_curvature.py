@@ -337,6 +337,77 @@ note(abs(kink1) < abs(kink0) * 0.5, f"and still evens the kink ({kink0*1000:.2f}
 flipped, kink0, kink1, narrowest = narrow_ladder(with_ring=True)
 note(flipped == 0 and narrowest > 0.0001, f"with Ring Width fighting it: no flip either (narrowest {narrowest*1000:.2f}mm, {flipped} flipped checks)")
 
+print("\n=== 11. a cube with a loop cut rounds off symmetrically ===")
+def cut_cube():
+    for o in list(bpy.data.objects): bpy.data.objects.remove(o)
+    bpy.ops.mesh.primitive_cube_add(size=2, location=(0, 0, 0))
+    ob = bpy.context.active_object
+    ob.modifiers.new("Subdivision", "SUBSURF").levels = 2
+    bpy.ops.object.mode_set(mode="EDIT")
+    bpy.context.tool_settings.mesh_select_mode = (False, True, False)
+    bm = bmesh.from_edit_mesh(ob.data); _KEEP.append(bm)
+    vertical = [e for e in bm.edges if abs(e.verts[0].co.z - e.verts[1].co.z) > 1.5]
+    bmesh.ops.subdivide_edges(bm, edges=vertical, cuts=1, use_grid_fill=True)
+    bmesh.update_edit_mesh(ob.data)
+    bm = bmesh.from_edit_mesh(ob.data); bm.verts.ensure_lookup_table(); _KEEP.append(bm)
+    for v in bm.verts: v.select = True
+    for e in bm.edges: e.select = True
+    bmesh.update_edit_mesh(ob.data)
+    bpy.ops.object.final_topology_add_constraint("EXEC_DEFAULT", constraint_type="CURVATURE", name="Cv")
+    c = ob.data.ft_custom_constraints[0]
+    c.stop_at_poles = False; c.stop_at_turns = False; c.stop_at_crease = False
+    c.curvature_mode = "BLUR"; c.curvature_bridge_poles = True
+    return ob, c
+ob, c = cut_cube()
+bm = bmesh.from_edit_mesh(ob.data); bm.verts.ensure_lookup_table(); _KEEP.append(bm)
+corners = [v.index for v in bm.verts if len(v.link_edges) == 3]
+cuts = [v.index for v in bm.verts if len(v.link_edges) == 4]
+note(len(corners) == 8 and len(cuts) == 4 and len(bm.verts) == 12, f"cube with one loop cut: {len(corners)} corners, {len(cuts)} cut verts")
+mod = __import__(MOD, fromlist=["utils"])
+loops = mod.utils.get_attribute_elements(ob, bm, c, domain="EDGE", as_domain="POINT")
+shapes = sorted((len(v), circ) for v, circ in loops)
+note(shapes == [(2, False)] * 8 + [(3, False)] * 4 + [(4, True)], f"decomposition is the symmetric one: 8 single edges, 4 corner-cut-corner loops, the ring ({shapes})")
+r0 = {i: bm.verts[i].co.length for i in range(12)}
+bpy.ops.mesh.final_topology_optimization_step("EXEC_DEFAULT", iterations=150)
+bm = bmesh.from_edit_mesh(ob.data); bm.verts.ensure_lookup_table(); _KEEP.append(bm)
+rc = [bm.verts[i].co.length for i in corners]
+ru = [bm.verts[i].co.length for i in cuts]
+note(max(rc) - min(rc) < 1e-4 and max(ru) - min(ru) < 1e-4, f"all corners alike, all cut verts alike (spreads {max(rc)-min(rc):.1e}, {max(ru)-min(ru):.1e})")
+moved = max(abs(bm.verts[i].co.length - r0[i]) for i in corners)
+note(moved > 0.05, f"the corners move too, bridged through the right angles ({moved:.3f})")
+ratio0 = math.sqrt(3) / math.sqrt(2)
+ratio = (sum(rc) / 8) / (sum(ru) / 4)
+note(ratio < ratio0 - 0.1, f"corner to cut-vert radius ratio heads toward a sphere ({ratio0:.3f} -> {ratio:.3f})")
+
+print("\n=== 6b. bridged poles move even with Surroundings on ===")
+z_ctx_anchored = None
+def dented_sphere_ctx(bridge, context):
+    for o in list(bpy.data.objects): bpy.data.objects.remove(o)
+    bpy.ops.mesh.primitive_uv_sphere_add(segments=12, ring_count=8, radius=1.0, location=(0, 0, 0))
+    ob = bpy.context.active_object
+    ob.modifiers.new("Subdivision", "SUBSURF").levels = 1
+    bpy.ops.object.mode_set(mode="EDIT")
+    bpy.context.tool_settings.mesh_select_mode = (False, True, False)
+    bm = bmesh.from_edit_mesh(ob.data); bm.verts.ensure_lookup_table(); _KEEP.append(bm)
+    pole = max(bm.verts, key=lambda v: v.co.z)
+    pole.co.z -= 0.15
+    pidx = pole.index
+    # assign only the upper half: the loops end on the north pole and, at
+    # the equator, in unassigned surroundings
+    for v in bm.verts: v.select = v.co.z > -0.01
+    for e in bm.edges: e.select = e.verts[0].select and e.verts[1].select
+    bmesh.update_edit_mesh(ob.data)
+    bpy.ops.object.final_topology_add_constraint("EXEC_DEFAULT", constraint_type="CURVATURE", name="Cv")
+    c = ob.data.ft_custom_constraints[0]
+    c.curvature_bridge_poles = bridge; c.stop_at_poles = True; c.curvature_context_steps = context
+    bpy.ops.mesh.final_topology_optimization_step("EXEC_DEFAULT", iterations=150)
+    bm = bmesh.from_edit_mesh(ob.data); bm.verts.ensure_lookup_table(); _KEEP.append(bm)
+    return bm.verts[pidx].co.z
+z_a = dented_sphere_ctx(False, 2)
+z_b = dented_sphere_ctx(True, 2)
+note(abs(z_a - 0.85) < 1e-6, f"Surroundings 2, no bridging: the pole is a dead anchor (z {z_a:.3f})")
+note(z_b > 0.93, f"Surroundings 2 with bridging: the pole moves out again (z {z_a:.3f} -> {z_b:.3f})")
+
 print("\n=== 10. coincident vertices never divide by zero ===")
 mod = __import__(MOD, fromlist=["extras"])
 ex = mod.extras

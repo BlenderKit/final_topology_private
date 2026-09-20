@@ -80,9 +80,22 @@ def set_modifiers_start(obj):
     return modifiers_state_start
 
 
+def object_still_exists(obj):
+    """False once the object's data was freed - deleted, undone away or
+    replaced by loading another file - when touching it would raise."""
+    try:
+        obj.name
+    except ReferenceError:
+        return False
+    return True
+
+
 def set_modifiers_end(obj, modifiers_state_start):
     """Restore the remembered modifier settings, writing only what differs.
-    Returns the number of settings written."""
+    Returns the number of settings written. An object that no longer exists
+    has nothing to restore."""
+    if not object_still_exists(obj):
+        return 0
     writes = 0
     virtual = []
     for i, modifier in enumerate(obj.modifiers):

@@ -43,9 +43,52 @@ def clear_draw_list():
     draw_pins.clear()
 
 
-def add_pin(co):
-    """Mark a pinned vertex - drawn as a little red square, like UV pins."""
-    draw_pins.append(tuple(co))
+PIN_ALPHA = 0.5
+
+
+def pin_alpha():
+    """Pins follow the Overlays Alpha slider like every overlay, only twice
+    as strong, so they read above the rest at any setting - and never
+    fully opaque, the vertex under a pin stays visible."""
+    try:
+        overlays = bpy.context.preferences.addons[__package__].preferences.overlays_alpha
+    except (AttributeError, KeyError):
+        overlays = 0.5
+    return max(0.0, min(1.0, PIN_ALPHA * 2.0 * overlays))
+
+
+def pin_half_size():
+    """Half the pin square's side in region pixels: a pin must read above
+    the vertex dot it marks, so it follows the theme's vertex size (a
+    diameter, scaled by the interface scale) with a margin around it."""
+    try:
+        vertex_size = bpy.context.preferences.themes[0].view_3d.vertex_size
+    except (AttributeError, IndexError):
+        vertex_size = 3
+    try:
+        vertex_size *= bpy.context.preferences.system.ui_scale
+    except AttributeError:
+        pass
+    return max(4.0, vertex_size * 0.5 + 2.0)
+
+
+def add_pin(co, normal=None):
+    """Mark a pinned vertex - drawn as a little red square, like UV pins.
+    With its world normal given, a pin facing away from the viewer is left
+    out in solid shading, like the vertex it marks."""
+    draw_pins.append((tuple(co), None if normal is None else tuple(normal)))
+
+
+def pin_faces_viewer(co, normal, view_point, view_direction):
+    """True when a pin's normal points toward the viewer: toward the eye in
+    perspective (view_point given), against the view direction otherwise.
+    Without a normal the pin always shows."""
+    if normal is None:
+        return True
+    n = Vector(normal)
+    if view_point is not None:
+        return n.dot(view_point - Vector(co)) > 0.0
+    return n.dot(view_direction) > 0.0
 
 
 def scale_alpha(colors, factor):
@@ -204,7 +247,9 @@ def draw_callback_px_2d(self, context):
     red squares of a fixed screen size like the UV editor's pins. Drawn as
     projected quads rather than GPU points - the point primitive ignores its
     size on Metal and shrinks to an invisible speck. Pins show whenever the
-    modal runs, whatever the active constraint and the overlay preference.
+    modal runs, whatever the active constraint and the overlay preference,
+    and size themselves after the theme's vertex size so they stay visible
+    over enlarged vertices. They follow Overlays Alpha at double strength.
     """
     if bpy.context.mode != "EDIT_MESH" or not draw_pins:
         return
@@ -213,9 +258,23 @@ def draw_callback_px_2d(self, context):
     if region is None or rv3d is None:
         return
 
-    half = 4.0
+    # in solid shading a pin behind the surface is hidden with its vertex;
+    # wireframe and x-ray show everything, so all pins draw there
+    cull = False
+    space = getattr(context, "space_data", None)
+    shading = getattr(space, "shading", None)
+    if shading is not None and shading.type in ("SOLID", "MATERIAL", "RENDERED") and not shading.show_xray:
+        cull = True
+    view_point = None
+    view_direction = rv3d.view_rotation @ Vector((0.0, 0.0, 1.0))
+    if rv3d.is_perspective:
+        view_point = rv3d.view_matrix.inverted().translation
+
+    half = pin_half_size()
     coords = []
-    for co in draw_pins:
+    for co, normal in draw_pins:
+        if cull and not pin_faces_viewer(co, normal, view_point, view_direction):
+            continue
         p = bpy_extras.view3d_utils.location_3d_to_region_2d(region, rv3d, Vector(co))
         if p is None:
             continue
@@ -232,7 +291,7 @@ def draw_callback_px_2d(self, context):
         shader = gpu.shader.from_builtin("UNIFORM_COLOR")
     gpu.state.blend_set("ALPHA")
     batch = batch_for_shader(shader, "TRIS", {"pos": coords})
-    shader.uniform_float("color", (1.0, 0.12, 0.12, 0.95))
+    shader.uniform_float("color", (1.0, 0.12, 0.12, pin_alpha()))
     shader.bind()
     batch.draw(shader)
     gpu.state.blend_set("NONE")

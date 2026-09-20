@@ -126,6 +126,31 @@ c.stop_at_crease = False
 loops = mod.utils.get_attribute_elements(ob, bm, c, domain="EDGE", as_domain="POINT")
 note(len(loops) == n_side, f"switched off, the rows are whole again ({len(loops)})")
 
+print("\n=== 1d. the decomposition does not depend on the edge order ===")
+for o in list(bpy.data.objects): bpy.data.objects.remove(o)
+bpy.ops.mesh.primitive_cube_add(size=2, location=(0, 0, 0))
+ob = bpy.context.active_object
+bpy.ops.object.mode_set(mode="EDIT")
+bm = bmesh.from_edit_mesh(ob.data); _KEEP.append(bm)
+vertical = [e for e in bm.edges if abs(e.verts[0].co.z - e.verts[1].co.z) > 1.5]
+bmesh.ops.subdivide_edges(bm, edges=vertical, cuts=1, use_grid_fill=True)
+bmesh.update_edit_mesh(ob.data)
+bm = bmesh.from_edit_mesh(ob.data); bm.edges.ensure_lookup_table(); _KEEP.append(bm)
+edges = list(bm.edges)
+def canon(loops):
+    out = []
+    for verts, circ in loops:
+        key = tuple(sorted(verts)) if circ else tuple(min(verts, verts[::-1]))
+        out.append((key, circ))
+    return sorted(out)
+a = canon(mod.utils.sort_edges_into_loops(edges, stop_at_poles=False, stop_at_turns=False))
+b = canon(mod.utils.sort_edges_into_loops(edges[::-1], stop_at_poles=False, stop_at_turns=False))
+import random
+random.seed(3); shuffled = edges[:]; random.shuffle(shuffled)
+d = canon(mod.utils.sort_edges_into_loops(shuffled, stop_at_poles=False, stop_at_turns=False))
+note(a == b == d, f"cube with a loop cut, stops off: same loops from any edge order ({len(a)} loops)")
+note(sorted(len(k) for k, _ in a) == [2] * 8 + [3] * 4 + [4], "corners end the loops, nothing turns a corner by luck")
+
 print("\n=== 2. simple ring selections keep working as before ===")
 for o in list(bpy.data.objects): bpy.data.objects.remove(o)
 bpy.ops.mesh.primitive_uv_sphere_add(segments=16, ring_count=12, radius=1.0)

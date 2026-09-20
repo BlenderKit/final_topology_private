@@ -299,4 +299,129 @@ h1 = bump_height(ob, bump)
 # the one that flattens
 note(h1 < h0 * 0.75, f"round fairs the cone's creases down ({h0:.3f} -> {h1:.3f})")
 
+print("\n=== 11. round makes a smooth bump through a raised pin, not a tent ===")
+def pinned_bump(mode):
+    for o in list(bpy.data.objects): bpy.data.objects.remove(o)
+    bpy.ops.mesh.primitive_grid_add(x_subdivisions=12, y_subdivisions=12, size=2, location=(0, 0, 0))
+    ob = bpy.context.active_object
+    ob.modifiers.new("Subdivision", "SUBSURF").levels = 1
+    bpy.ops.object.mode_set(mode="EDIT")
+    bpy.context.tool_settings.mesh_select_mode = (True, False, False)
+    bm = bmesh.from_edit_mesh(ob.data); bm.verts.ensure_lookup_table(); _KEEP.append(bm)
+    center = min(bm.verts, key=lambda v: v.co.length)
+    center.co.z = 0.3
+    ci = center.index
+    for v in bm.verts: v.select = True
+    bmesh.update_edit_mesh(ob.data)
+    bpy.ops.object.final_topology_add_constraint("EXEC_DEFAULT", constraint_type="SMOOTH", name="S")
+    c = ob.data.ft_custom_constraints[0]; c.smooth_mode = mode
+    bm = bmesh.from_edit_mesh(ob.data); bm.verts.ensure_lookup_table(); _KEEP.append(bm)
+    border = {v.index for v in bm.verts if v.is_boundary}
+    for v in bm.verts: v.select = v.index == ci or v.index in border
+    bmesh.update_edit_mesh(ob.data)
+    bpy.ops.object.final_topology_add_constraint("EXEC_DEFAULT", constraint_type="PIN", name="P")
+    bpy.ops.mesh.final_topology_optimization_step("EXEC_DEFAULT", iterations=60)
+    bm = bmesh.from_edit_mesh(ob.data); bm.verts.ensure_lookup_table(); _KEEP.append(bm)
+    c0 = bm.verts[ci].co
+    rings = {}
+    for v in bm.verts:
+        d = round(max(abs(v.co.x - c0.x), abs(v.co.y - c0.y)) / (2 / 12))
+        rings.setdefault(d, []).append(v.co.z)
+    return [sum(z) / len(z) for d, z in sorted(rings.items())]
+prof = pinned_bump("CURVATURE")
+z0, z1, z2 = prof[0], prof[1], prof[2]
+note(abs(z0 - 0.3) < 1e-6, "the pin stays at its height")
+note(z1 > 0.6 * z0, f"first ring rises with the pin, no tent (ring 1 at {z1/z0:.2f} of the pin height)")
+note(z0 - z1 < z1 - z2, f"the top is the flattest part of the bump ({z0:.3f}, {z1:.3f}, {z2:.3f})")
+
+print("\n=== 12. round on a closed mesh with poles stays bounded ===")
+# the equations have no exact solution here; the solve must not run away
+for o in list(bpy.data.objects): bpy.data.objects.remove(o)
+bpy.ops.mesh.primitive_cube_add(size=2, location=(0, 0, 0))
+ob = bpy.context.active_object
+ob.modifiers.new("Subdivision", "SUBSURF").levels = 1
+bpy.ops.object.mode_set(mode="EDIT")
+bm = bmesh.from_edit_mesh(ob.data); _KEEP.append(bm)
+bmesh.ops.subdivide_edges(bm, edges=list(bm.edges), cuts=2, use_grid_fill=True)
+bmesh.ops.poke(bm, faces=[f for f in bm.faces if f.calc_center_median().z > 0.9])   # a few poles on top
+for i, v in enumerate(bm.verts):
+    v.co += Vector((math.sin(i * 1.7), math.cos(i * 2.3), math.sin(i * 0.9))) * 0.08
+bmesh.update_edit_mesh(ob.data)
+bm = bmesh.from_edit_mesh(ob.data); bm.verts.ensure_lookup_table(); _KEEP.append(bm)
+bpy.context.tool_settings.mesh_select_mode = (True, False, False)
+for v in bm.verts: v.select = True
+bmesh.update_edit_mesh(ob.data)
+bpy.ops.object.final_topology_add_constraint("EXEC_DEFAULT", constraint_type="SMOOTH", name="S")
+ob.data.ft_custom_constraints[0].smooth_mode = "CURVATURE"
+bm = bmesh.from_edit_mesh(ob.data); bm.verts.ensure_lookup_table(); _KEEP.append(bm)
+size0 = max(v.co.length for v in bm.verts)
+bpy.ops.mesh.final_topology_optimization_step("EXEC_DEFAULT", iterations=200)
+bm = bmesh.from_edit_mesh(ob.data); bm.verts.ensure_lookup_table(); _KEEP.append(bm)
+size1 = max(v.co.length for v in bm.verts)
+note(size1 < size0 * 1.3 and all(math.isfinite(x) for v in bm.verts for x in v.co), f"200 steps of Round keep a fully selected closed mesh within 30% of its size ({size0:.2f} -> {size1:.2f})")
+
+print("\n=== 13. poles inside an anchored patch stay put under the direct solve ===")
+for o in list(bpy.data.objects): bpy.data.objects.remove(o)
+bpy.ops.mesh.primitive_grid_add(x_subdivisions=10, y_subdivisions=10, size=2, location=(0, 0, 0))
+ob = bpy.context.active_object
+ob.modifiers.new("Subdivision", "SUBSURF").levels = 1
+bpy.ops.object.mode_set(mode="EDIT")
+bm = bmesh.from_edit_mesh(ob.data); _KEEP.append(bm)
+# a poked face in the middle: a 4-valence triangle fan center and four
+# 5-poles around it, all inside a bordered (anchored) patch
+middle = min(bm.faces, key=lambda f: f.calc_center_median().length)
+bmesh.ops.poke(bm, faces=[middle])
+for i, v in enumerate(bm.verts):
+    if not v.is_boundary:
+        v.co.z += 0.05 * math.sin(i * 1.3)
+bmesh.update_edit_mesh(ob.data)
+bm = bmesh.from_edit_mesh(ob.data); bm.verts.ensure_lookup_table(); _KEEP.append(bm)
+poles = [v.index for v in bm.verts if not v.is_boundary and len(v.link_edges) != 4]
+bpy.context.tool_settings.mesh_select_mode = (True, False, False)
+for v in bm.verts: v.select = not v.is_boundary
+bmesh.update_edit_mesh(ob.data)
+bpy.ops.object.final_topology_add_constraint("EXEC_DEFAULT", constraint_type="SMOOTH", name="S")
+ob.data.ft_custom_constraints[0].smooth_mode = "CURVATURE"
+bm = bmesh.from_edit_mesh(ob.data); bm.verts.ensure_lookup_table(); _KEEP.append(bm)
+before = {v.index: v.co.copy() for v in bm.verts}
+bpy.ops.mesh.final_topology_optimization_step("EXEC_DEFAULT", iterations=100)
+bm = bmesh.from_edit_mesh(ob.data); bm.verts.ensure_lookup_table(); _KEEP.append(bm)
+pole_move = max((bm.verts[i].co - before[i]).length for i in poles)
+moves = sorted((v.co - before[v.index]).length for v in bm.verts if v.select and v.index not in poles)
+any_move = max((v.co - before[v.index]).length for v in bm.verts)
+note(len(poles) >= 4, f"{len(poles)} poles inside the patch")
+note(pole_move < 2 * moves[len(moves) // 2] + 0.02, f"poles move with their neighbours, not as levers (poles max {pole_move:.3f}, neighbours median {moves[len(moves)//2]:.3f})")
+note(any_move < 0.2 and all(math.isfinite(x) for v in bm.verts for x in v.co), f"the patch around them stays bounded (max move {any_move:.3f})")
+
+print("\n=== 14. Works on Subdivision: smoothing still moves the cage ===")
+def subd_bump(mode, on):
+    for o in list(bpy.data.objects): bpy.data.objects.remove(o)
+    bpy.ops.mesh.primitive_grid_add(x_subdivisions=10, y_subdivisions=10, size=2, location=(0, 0, 0))
+    ob = bpy.context.active_object
+    ob.modifiers.new("Subdivision", "SUBSURF").levels = 2
+    bpy.ops.object.mode_set(mode="EDIT")
+    bpy.context.tool_settings.mesh_select_mode = (True, False, False)
+    bm = bmesh.from_edit_mesh(ob.data); bm.verts.ensure_lookup_table(); _KEEP.append(bm)
+    for v in bm.verts:
+        if not v.is_boundary: v.co.z += 0.08 * math.sin(v.index * 1.9)   # jagged inside
+    for v in bm.verts: v.select = not v.is_boundary
+    bmesh.update_edit_mesh(ob.data)
+    bpy.ops.object.final_topology_add_constraint("EXEC_DEFAULT", constraint_type="SMOOTH", name="S")
+    c = ob.data.ft_custom_constraints[0]; c.smooth_mode = mode; c.works_on_subdivision = on
+    bm = bmesh.from_edit_mesh(ob.data); bm.verts.ensure_lookup_table(); _KEEP.append(bm)
+    before = {v.index: v.co.copy() for v in bm.verts}
+    rough0 = sum(abs(v.co.z) for v in bm.verts if not v.is_boundary)
+    bpy.ops.mesh.final_topology_optimization_step("EXEC_DEFAULT", iterations=30)
+    bm = bmesh.from_edit_mesh(ob.data); bm.verts.ensure_lookup_table(); _KEEP.append(bm)
+    moved = max((v.co - before[v.index]).length for v in bm.verts)
+    rough1 = sum(abs(v.co.z) for v in bm.verts if not v.is_boundary)
+    return moved, rough1 / rough0
+for mode in ("BLEND", "CURVATURE"):
+    off_move, off_rough = subd_bump(mode, False)
+    on_move, on_rough = subd_bump(mode, True)
+    note(on_move > 0.3 * off_move, f"{mode}: with Works on Subdivision the cage still moves ({on_move:.3f} vs {off_move:.3f} without)")
+    # Blend flattens, Round evens curvature and may keep the shape's height:
+    # judge each against its own result without the option
+    note(on_rough < max(0.7, off_rough * 1.5), f"{mode}: and the result is like the cage-level one ({on_rough:.2f} of the start, {off_rough:.2f} without)")
+
 print("\n" + ("ALL PASSED" if not fails else f"FAILURES: {fails}"))
