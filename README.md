@@ -4,6 +4,8 @@ Blender 3D addon that introduces subdivision snapping, retopo and modeling tools
 
 ![A subdivision cage retopologized over a scanned statue: the low-poly mesh snaps so that its subdivided surface follows the scan](docs/images/retopo_statue.jpg)
 
+> **Support the development.** Final Topology is open source, and its development is funded by the people who use it. The easiest way to support it is to get the add-on through Blendkit: [Final Topology on Blendkit](https://www.blenderkit.com/asset-gallery-detail/388b195c-5a7d-4d9f-a632-0dac12c9198c/) with the [Full Plan](https://www.blenderkit.com/plans/pricing/), which also brings automatic updates through the Blendkit add-on and the whole asset library. Bug reports and pull requests are welcome here too.
+
 This Blender 3D addon features many tools that were missing and also organizes some simple, but essential tools for polygonal modeling.
 The addon is distributed in two editions:
 
@@ -107,9 +109,11 @@ Edge constraints split their assigned edges into loops the way Blender's loop se
 - [Final Topology Blender add-on tutorial](https://www.youtube.com/watch?v=5JWf-B89msU) - the tutorial the panel's Watch Tutorial button opens
 - [A new approach to Retopology](https://www.youtube.com/watch?v=7AR9-LxY6AQ) - the Blender Conference talk on the idea behind the add-on
 
-## Download
+## Download and support
 
-Final Topology add-on is available in [Full Plan subscription](https://www.blenderkit.com/plans/pricing/) to Blendkit: [Final Topology on Blendkit](https://www.blenderkit.com/asset-gallery-detail/388b195c-5a7d-4d9f-a632-0dac12c9198c/).
+The source is here for everyone to read, build and improve. Building it yourself works with `build.py --all`, and you can install the archive from `out/` as an extension.
+
+If Final Topology saves you time, please get it through Blendkit and keep the development going: [Final Topology on Blendkit](https://www.blenderkit.com/asset-gallery-detail/388b195c-5a7d-4d9f-a632-0dac12c9198c/) is part of the [Full Plan subscription](https://www.blenderkit.com/plans/pricing/). Subscribers get both editions, updates through the Blendkit add-on, and the full asset library, and every subscription funds the next features and fixes in this repository.
 
 ## Support
 
